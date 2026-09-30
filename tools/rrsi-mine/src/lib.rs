@@ -456,6 +456,9 @@ pub fn mine(repo: &Path, out: &Path, cands: Vec<Candidate>, jobs: usize, docker:
     Ok(())
 }
 
+pub mod llm;
+pub mod scan;
+
 #[cfg(feature = "python")]
 mod python;
 
