@@ -7,7 +7,7 @@
 > people's code, or wrote test tasks by hand and checked each one yourself.
 >
 > **Now:** one command turns your repository's git history into a verified
-> exam — 86 recent commits in 22 minutes on one machine, 70 of them proven
+> exam — 86 recent commits in about 11 minutes on one machine, 70 of them proven
 > questions (the tests fail before the real fix and pass after it, offline) —
 > and it warns you when the final exam is not a fair test.
 >
