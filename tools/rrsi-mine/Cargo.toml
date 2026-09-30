@@ -35,6 +35,8 @@ starlark_syntax = "0.14.2"
 # csfc diagnostics (`file:line:col: CODE: message`) and a bounded csfc run.
 regex = "1"
 wait-timeout = "0.2"
+# rrsi-report renders its CSF section server-side (src/report/csf.rs).
+html-escape = "0.2.15"
 pyo3 = { version = "0.25", features = ["extension-module", "abi3-py310"], optional = true }
 
 [profile.release]

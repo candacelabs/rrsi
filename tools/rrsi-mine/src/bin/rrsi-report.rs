@@ -58,6 +58,11 @@ struct Cli {
     /// "health":{..}} (health: see report/health.rs).
     #[arg(long)]
     splits_out: Option<PathBuf>,
+    /// Group tasks by their CSF component (task.json `csf`, written by
+    /// `rrsi-mine mine`/`csf annotate`) instead of their folder, where a
+    /// task's fix maps to one. The CSF section appears either way.
+    #[arg(long)]
+    csf_areas: bool,
 }
 
 fn main() -> Result<()> {
@@ -84,6 +89,11 @@ fn main() -> Result<()> {
         None => eprintln!("rrsi-report: no --repo, so no commit dates: the held-out split \
                            falls back to sha order and the timeline is skipped"),
     }
+    let csf = report::csf::load(&cli.tasks);
+    if cli.csf_areas {
+        let n = report::csf::apply_areas(&mut tasks, &csf);
+        eprintln!("rrsi-report: --csf-areas: {n} task(s) grouped by CSF component");
+    }
     let exam = report::load::exam_lines(&cli.tasks);
     let splits = report::split::assign(&mut tasks, cli.heldout);
     let health = report::health::health(&tasks);
@@ -94,6 +104,7 @@ fn main() -> Result<()> {
         tasks: &tasks, splits: &splits, health: &health, start: &start, page: &page,
         heldout: cli.heldout, exam_lines: exam,
     }, &report::render::now_utc())?;
+    let html = report::csf::inject(&html, report::csf::section(&tasks, &csf, &page.figures).as_deref());
     std::fs::write(&cli.out, html).with_context(|| format!("writing {}", cli.out.display()))?;
     if let Some(p) = &cli.splits_out {
         let out = serde_json::json!({
