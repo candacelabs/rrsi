@@ -36,7 +36,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -70,8 +70,79 @@ pub struct TaskRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub passes_after: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_outcome: Option<Outcome>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit_outcome: Option<Outcome>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
     pub seconds: f64,
+}
+
+/// What one `go test` run proved. Only `TestFail` and `BuildFail` are
+/// evidence that the tests fail; `Infra` says nothing about the code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Outcome {
+    Pass,
+    /// A test ran and failed.
+    TestFail,
+    /// The package or its tests did not compile (for a parent tree this is
+    /// the normal case: the new tests call code that does not exist yet).
+    BuildFail,
+    /// The run never reached the code: module download, network, go.mod
+    /// resolution or setup. Never counts as the tests failing.
+    Infra,
+    /// Killed by the timeout: ambiguous, never evidence either way.
+    Timeout,
+}
+
+/// Log fragments that mean the toolchain could not assemble the build
+/// inputs. Any of them makes the run `Infra`, whatever the exit code says.
+pub const INFRA_MARKERS: [&str; 8] = [
+    "module lookup disabled by GOPROXY",
+    "missing go.sum entry",
+    "go: updates to go.mod needed",
+    "dial tcp",
+    "i/o timeout",
+    "no such host",
+    "cannot find module providing package",
+    "go: downloading",
+];
+
+/// Classify one `go test` run from its exit code and combined output.
+pub fn classify(exit: i32, log: &str) -> Outcome {
+    if exit == 0 {
+        return Outcome::Pass;
+    }
+    if exit == 137 || exit == 124 {
+        return Outcome::Timeout;
+    }
+    // "go: downloading" alone is only a download; with a failure it means
+    // the cache was cold and the offline run could not finish assembling.
+    if INFRA_MARKERS.iter().any(|m| log.contains(m)) {
+        return Outcome::Infra;
+    }
+    if log.contains("[build failed]") || log.contains("undefined: ")
+        || log.contains("[setup failed]") && log.contains(".go:") && !log.contains("module") {
+        return Outcome::BuildFail;
+    }
+    if log.contains("--- FAIL") || log.contains("[FAIL]") || log.contains("FAIL\t") {
+        return Outcome::TestFail;
+    }
+    Outcome::Infra
+}
+
+/// FAIL_TO_PASS: valid only when the parent run really failed (a test
+/// failed or the new tests did not compile) and the commit run passed.
+/// An `Infra` or `Timeout` run on either side is never evidence.
+pub fn decide(parent: Outcome, commit: Outcome) -> (bool, &'static str) {
+    use Outcome::*;
+    match (parent, commit) {
+        (Infra, _) | (_, Infra) => (false, "infra: a run could not assemble its build inputs"),
+        (Timeout, _) | (_, Timeout) => (false, "timeout: a run was killed"),
+        (Pass, _) => (false, "tests already pass on parent"),
+        (_, TestFail) | (_, BuildFail) => (false, "tests fail on the commit"),
+        (TestFail, Pass) | (BuildFail, Pass) => (true, "ok"),
+    }
 }
 
 pub struct Docker<'a> {
@@ -178,8 +249,8 @@ pub fn workdir(root: &str) -> String {
 
 impl Docker<'_> {
     /// `go test` of `packages` under `module_root` in a network-less
-    /// container. Returns whether it passed and a log of the run.
-    pub fn go_test(&self, tree: &Path, module_root: &str, packages: &[String]) -> Result<(bool, String)> {
+    /// container. Returns the classified outcome and a log of the run.
+    pub fn go_test(&self, tree: &Path, module_root: &str, packages: &[String]) -> Result<(Outcome, String)> {
         let mount = format!("{}:/src", tree.display());
         let mut cmd = Command::new("docker");
         cmd.args(["run", "--rm", "--network", "none", "--cpus", "4", "--memory", "6g",
@@ -198,24 +269,22 @@ impl Docker<'_> {
         let log = format!("$ go test -count=1 {}\nexit={}\n{}{}",
             packages.join(" "), out.status.code().unwrap_or(-1),
             tail(&out.stdout), tail(&out.stderr));
-        Ok((out.status.success(), log))
+        Ok((classify(out.status.code().unwrap_or(-1), &log), log))
     }
 
-    /// Fill the module cache once per module root, with network, before the
-    /// network-less test runs.
-    pub fn warm(&self, repo: &Path, sha: &str, root: &str) -> Result<()> {
-        let dir = tempfile::Builder::new().prefix("rrsi-warm-").tempdir()?;
-        export_tree(repo, sha, dir.path())?;
-        let st = Command::new("docker")
-            .args(["run", "--rm", "-e", "GOTOOLCHAIN=local",
+    /// Download every module `tree` needs into the shared cache, with
+    /// network, so the network-less test run of THIS tree can build. A cache
+    /// warmed at some other commit is not enough: older commits pin other
+    /// module versions (2026-09-30: this made valid tasks look invalid, and
+    /// could make a parent's download failure look like a failing test).
+    pub fn download(&self, tree: &Path, module_root: &str) -> Result<(bool, String)> {
+        let out = Command::new("docker")
+            .args(["run", "--rm", "-e", "GOTOOLCHAIN=local", "-e", "GOFLAGS=-mod=mod",
                    "-v", &format!("{}:/go/pkg/mod", self.modcache),
-                   "-v", &format!("{}:/src", dir.path().display()),
-                   "-w", &workdir(root), self.image, "go", "mod", "download"])
-            .stdout(Stdio::null()).stderr(Stdio::null()).status()?;
-        if !st.success() {
-            eprintln!("[mine] WARNING go mod download failed for {root}");
-        }
-        Ok(())
+                   "-v", &format!("{}:/src", tree.display()),
+                   "-w", &workdir(module_root), self.image, "go", "mod", "download", "all"])
+            .output().context("running docker")?;
+        Ok((out.status.success(), String::from_utf8_lossy(&out.stderr).into_owned()))
     }
 }
 
@@ -249,39 +318,63 @@ pub fn validate(repo: &Path, out: &Path, cand: &Candidate, docker: &Docker) -> R
     export_tree(repo, &cand.parent, &parent)?;
     export_tree(repo, &cand.sha, &commit)?;
     let mut rec = TaskRecord { cand: cand.clone(), valid: false, reason: String::new(),
-                               fails_before: None, passes_after: None, detail: None, seconds: 0.0 };
+                               fails_before: None, passes_after: None, parent_outcome: None,
+                               commit_outcome: None, detail: None, seconds: 0.0 };
     if let Some(err) = apply_patch(&parent, &tests_patch)? {
         rec.reason = "tests.patch does not apply to parent".into();
         rec.detail = Some(err.chars().take(400).collect());
     } else {
-        let (parent_ok, parent_log) = docker.go_test(&parent, &cand.module_root, &cand.packages)?;
+        let mut infra = None;
+        for (name, tree) in [("parent", &parent), ("commit", &commit)] {
+            let (ok, log) = docker.download(tree, &cand.module_root)?;
+            if !ok {
+                infra = Some(format!("{name}: go mod download failed: {}",
+                                     log.chars().rev().take(300).collect::<String>().chars().rev().collect::<String>()));
+            }
+        }
+        let (parent_out, parent_log) = docker.go_test(&parent, &cand.module_root, &cand.packages)?;
         std::fs::write(tdir.join("parent.log"), parent_log)?;
-        let (passes_after, commit_log) = docker.go_test(&commit, &cand.module_root, &cand.packages)?;
+        let (commit_out, commit_log) = docker.go_test(&commit, &cand.module_root, &cand.packages)?;
         std::fs::write(tdir.join("commit.log"), commit_log)?;
-        let fails_before = !parent_ok;
-        rec.valid = fails_before && passes_after;
-        rec.reason = match (fails_before, passes_after) {
-            (true, true) => "ok",
-            (false, _) => "tests already pass on parent",
-            (true, false) => "tests fail on the commit",
-        }.into();
-        rec.fails_before = Some(fails_before);
-        rec.passes_after = Some(passes_after);
+        let (valid, reason) = decide(parent_out, commit_out);
+        rec.valid = valid;
+        rec.reason = reason.into();
+        rec.parent_outcome = Some(parent_out);
+        rec.commit_outcome = Some(commit_out);
+        rec.fails_before = Some(matches!(parent_out, Outcome::TestFail | Outcome::BuildFail));
+        rec.passes_after = Some(commit_out == Outcome::Pass);
+        if infra.is_some() {
+            rec.detail = infra;
+        }
     }
     rec.seconds = (t0.elapsed().as_secs_f64() * 10.0).round() / 10.0;
-    std::fs::write(&task_json, serde_json::to_string_pretty(&rec)?)?;
+    // An infra or timeout verdict is not a fact about the commit: leave no
+    // task.json so the next run retries it instead of reusing the verdict.
+    if matches!(rec.parent_outcome, Some(Outcome::Infra | Outcome::Timeout))
+        || matches!(rec.commit_outcome, Some(Outcome::Infra | Outcome::Timeout)) {
+        std::fs::write(tdir.join("retry.json"), serde_json::to_string_pretty(&rec)?)?;
+    } else {
+        std::fs::write(&task_json, serde_json::to_string_pretty(&rec)?)?;
+    }
     Ok(rec)
 }
 
+/// The git work tree containing `path` (or its nearest existing ancestor),
+/// if any. Mined tasks carry a repository's source: they must never be
+/// written inside a work tree, where they could be committed or published.
+pub fn enclosing_work_tree(path: &Path) -> Option<PathBuf> {
+    let abs = if path.is_absolute() { path.to_path_buf() }
+              else { std::env::current_dir().ok()?.join(path) };
+    abs.ancestors().find(|a| a.join(".git").exists()).map(Path::to_path_buf)
+}
+
 pub fn mine(repo: &Path, out: &Path, cands: Vec<Candidate>, jobs: usize, docker: &Docker) -> Result<()> {
+    if let Some(tree) = enclosing_work_tree(out) {
+        bail!("refusing to write mined tasks to {} inside the git work tree {}: \
+               they contain repository source", out.display(), tree.display());
+    }
     std::fs::create_dir_all(out)?;
     println!("[mine] {} candidates", cands.len());
-    let roots: BTreeSet<&str> = cands.iter().map(|c| c.module_root.as_str()).collect();
-    for root in roots {
-        let newest = cands.iter().find(|c| c.module_root == root).expect("root has a candidate");
-        println!("[mine] warming module cache for {} @ {}", if root.is_empty() { "." } else { root }, &newest.sha[..12]);
-        docker.warm(repo, &newest.sha, root)?;
-    }
     let next = AtomicUsize::new(0);
     let done = AtomicUsize::new(0);
     let results: Mutex<Vec<Option<TaskRecord>>> = Mutex::new((0..cands.len()).map(|_| None).collect());
@@ -322,6 +415,71 @@ mod python;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Regression, 2026-09-30: the module cache was warmed only at the newest
+    // commit per module, so offline runs of older trees failed with these
+    // exact lines and were scored as "tests fail". A download failure must
+    // never count as the tests failing, on either side.
+    const REAL_INFRA_LOG: &str = "$ go test -count=1 ./services/candaceos/webui\nexit=1\n\
+        FAIL\tgithub.com/candacelabs/candace/services/candaceos/webui [setup failed]\nFAIL\n\
+        go: downloading github.com/gin-contrib/sse v1.1.0\n\
+        # github.com/candacelabs/candace/services/candaceos/webui\n\
+        /go/pkg/mod/github.com/gin-gonic/gin@v1.12.0/context.go:25:2: \
+        module lookup disabled by GOPROXY=off\n";
+
+    #[test]
+    fn a_module_download_failure_is_infra_not_a_failing_test() {
+        assert_eq!(classify(1, REAL_INFRA_LOG), Outcome::Infra);
+        assert_eq!(classify(1, "x.go:3:2: missing go.sum entry for module providing package y"),
+                   Outcome::Infra);
+    }
+
+    #[test]
+    fn infra_on_either_side_never_makes_a_task_valid() {
+        use Outcome::*;
+        for other in [Pass, TestFail, BuildFail, Infra, Timeout] {
+            assert!(!decide(Infra, other).0, "parent Infra, commit {other:?}");
+            assert!(!decide(other, Infra).0, "parent {other:?}, commit Infra");
+            assert!(!decide(Timeout, other).0 && !decide(other, Timeout).0);
+        }
+    }
+
+    #[test]
+    fn only_a_real_failure_then_a_pass_is_valid() {
+        use Outcome::*;
+        assert_eq!(decide(TestFail, Pass), (true, "ok"));
+        assert_eq!(decide(BuildFail, Pass), (true, "ok"));
+        assert!(!decide(Pass, Pass).0);
+        assert!(!decide(TestFail, TestFail).0);
+        assert!(!decide(BuildFail, BuildFail).0);
+    }
+
+    #[test]
+    fn real_failures_classify_as_failures() {
+        assert_eq!(classify(0, "ok  \tpkg\t0.1s"), Outcome::Pass);
+        assert_eq!(classify(1, "--- FAIL: TestX (0.00s)\nFAIL\tpkg\t0.1s"), Outcome::TestFail);
+        assert_eq!(classify(1, "Ran 3 of 3 Specs\n[FAIL] Mailbox rejects duplicates\nFAIL\tpkg"),
+                   Outcome::TestFail);
+        assert_eq!(classify(1, "# pkg [pkg.test]\n./a_test.go:9:5: undefined: NewThing\n\
+                               FAIL\tpkg [build failed]"), Outcome::BuildFail);
+        assert_eq!(classify(137, ""), Outcome::Timeout);
+        // An exit with nothing recognizable is not evidence of a failing test.
+        assert_eq!(classify(1, "something odd"), Outcome::Infra);
+    }
+
+    #[test]
+    fn task_output_inside_any_work_tree_is_refused() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join(".git")).unwrap();
+        let inside = d.path().join("a/b/tasks");
+        assert_eq!(enclosing_work_tree(&inside).as_deref(), Some(d.path()));
+        let outside = tempfile::tempdir().unwrap();
+        assert!(enclosing_work_tree(&outside.path().join("tasks")).is_none());
+        let docker = Docker { image: "unused", modcache: "unused", buildcache: "unused", test_timeout: 1 };
+        let err = mine(d.path(), &inside, vec![], 1, &docker).unwrap_err();
+        assert!(format!("{err}").contains("inside the git work tree"));
+        assert!(!inside.exists(), "nothing may be created inside the work tree");
+    }
 
     #[test]
     fn packages_are_relative_to_the_module_root() {
