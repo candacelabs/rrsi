@@ -695,10 +695,10 @@ mod tests {
                               subject: "box: report when full".into(), body: String::new(),
                               module_root: "m".into(), packages: vec!["./pkg/box".into()],
                               src_files: vec!["m/pkg/box/box.go".into()],
-                              test_files: vec!["m/pkg/box/box_test.go".into()], src_churn: 4 },
+                              test_files: vec!["m/pkg/box/box_test.go".into()], src_churn: 4, csf: None },
             valid, reason: if valid { "ok".into() } else { "tests already pass on parent".into() },
             fails_before: None, passes_after: None, parent_outcome: Some(Outcome::BuildFail),
-            commit_outcome: Some(Outcome::Pass), detail: None, seconds: 1.0 };
+            commit_outcome: Some(Outcome::Pass), detail: None, csf_guards: None, seconds: 1.0 };
         std::fs::write(dir.join("task.json"), serde_json::to_string(&rec).unwrap()).unwrap();
         for (f, s) in [("src.patch", SRC), ("tests.patch", TESTS), ("parent.log", LOG)] {
             std::fs::write(dir.join(f), s).unwrap();
