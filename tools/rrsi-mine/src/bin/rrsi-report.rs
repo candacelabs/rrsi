@@ -47,7 +47,8 @@ struct Cli {
     /// The HTML report to write.
     #[arg(long)]
     out: PathBuf,
-    /// Also write the split as JSON {"evolve":[..],"heldout":[..],"excluded":{sha12: reason}}.
+    /// Also write the split as JSON {"evolve":[..],"heldout":[..],"excluded":{sha12: reason},
+    /// "health":{..}} (health: see report/health.rs).
     #[arg(long)]
     splits_out: Option<PathBuf>,
 }
@@ -78,15 +79,24 @@ fn main() -> Result<()> {
     }
     let exam = report::load::exam_lines(&cli.tasks);
     let splits = report::split::assign(&mut tasks, cli.heldout);
-    let html = report::render::render(&tasks, &splits, cli.heldout, exam,
+    let health = report::health::health(&tasks);
+    let html = report::render::render(&tasks, &splits, &health, cli.heldout, exam,
                                       &report::render::now_utc())?;
     std::fs::write(&cli.out, html).with_context(|| format!("writing {}", cli.out.display()))?;
     if let Some(p) = &cli.splits_out {
-        std::fs::write(p, serde_json::to_string_pretty(&splits)? + "\n")
+        let out = serde_json::json!({
+            "evolve": splits.evolve, "heldout": splits.heldout, "excluded": splits.excluded,
+            "health": health,
+        });
+        std::fs::write(p, serde_json::to_string_pretty(&out)? + "\n")
             .with_context(|| format!("writing {}", p.display()))?;
     }
     eprintln!("rrsi-report: {} tasks -> evolve {}, heldout {}, excluded {}; wrote {}",
               tasks.len(), splits.evolve.len(), splits.heldout.len(), splits.excluded.len(),
               cli.out.display());
+    for c in &health.checks {
+        eprintln!("  split health {:>4}: {}: {}",
+                  serde_json::to_value(&c.status)?.as_str().unwrap_or("?"), c.name, c.detail);
+    }
     Ok(())
 }

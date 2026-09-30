@@ -15,6 +15,7 @@
 //! Fill report/report.html with the tasks, the split and the summary as one
 //! embedded JSON document.
 
+use super::health::Health;
 use super::load::Task;
 use super::split::{examples, rule_sentence, summarize, Splits};
 use anyhow::{ensure, Result};
@@ -45,8 +46,8 @@ pub fn embed_json(v: &serde_json::Value) -> String {
 }
 
 /// The whole page.
-pub fn render(tasks: &[Task], splits: &Splits, heldout: usize, exam_lines: Option<usize>,
-              generated_at: &str) -> Result<String> {
+pub fn render(tasks: &[Task], splits: &Splits, health: &Health, heldout: usize,
+              exam_lines: Option<usize>, generated_at: &str) -> Result<String> {
     let data = json!({
         "generated_at": generated_at,
         "heldout_n": heldout,
@@ -55,6 +56,7 @@ pub fn render(tasks: &[Task], splits: &Splits, heldout: usize, exam_lines: Optio
         "exam_lines": exam_lines,
         "summary": summarize(tasks),
         "splits": splits,
+        "health": health,
         "examples": examples(tasks),
         "tasks": tasks,
     });

@@ -16,6 +16,7 @@
 //! rule, the HTML rendering and the work-tree guard.
 
 pub mod guard;
+pub mod health;
 pub mod load;
 pub mod render;
 pub mod split;
