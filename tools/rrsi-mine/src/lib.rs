@@ -108,8 +108,28 @@ pub const INFRA_MARKERS: [&str; 8] = [
     "go: downloading",
 ];
 
-/// Classify one `go test` run from its exit code and combined output.
-pub fn classify(exit: i32, log: &str) -> Outcome {
+/// The `module` path declared by the go.mod in `dir`, if readable.
+pub fn module_path(dir: &Path) -> Option<String> {
+    std::fs::read_to_string(dir.join("go.mod")).ok()?.lines()
+        .find_map(|l| l.strip_prefix("module ").map(|m| m.trim().trim_matches('"').to_string()))
+}
+
+/// Whether a toolchain line blames a package of the module under test
+/// itself. Go reports a package the new tests import but the parent tree
+/// lacks as "cannot find module providing package <own>/...: module lookup
+/// disabled", word for word like a download failure; it is a build failure
+/// of the code, not infrastructure.
+fn blames_own_module(line: &str, own: Option<&str>) -> bool {
+    match own {
+        Some(m) => line.contains(&format!("providing package {m}/"))
+            || line.contains(&format!("providing package {m}:")),
+        None => false,
+    }
+}
+
+/// Classify one `go test` run from its exit code, combined output and the
+/// module path of the tree under test.
+pub fn classify(exit: i32, log: &str, own_module: Option<&str>) -> Outcome {
     if exit == 0 {
         return Outcome::Pass;
     }
@@ -118,10 +138,15 @@ pub fn classify(exit: i32, log: &str) -> Outcome {
     }
     // "go: downloading" alone is only a download; with a failure it means
     // the cache was cold and the offline run could not finish assembling.
-    if INFRA_MARKERS.iter().any(|m| log.contains(m)) {
-        return Outcome::Infra;
+    let mut own_missing = false;
+    for line in log.lines() {
+        if blames_own_module(line, own_module) {
+            own_missing = true;
+        } else if INFRA_MARKERS.iter().any(|m| line.contains(m)) {
+            return Outcome::Infra;
+        }
     }
-    if log.contains("[build failed]") || log.contains("undefined: ")
+    if own_missing || log.contains("[build failed]") || log.contains("undefined: ")
         || log.contains("[setup failed]") && log.contains(".go:") && !log.contains("module") {
         return Outcome::BuildFail;
     }
@@ -269,7 +294,8 @@ impl Docker<'_> {
         let log = format!("$ go test -count=1 {}\nexit={}\n{}{}",
             packages.join(" "), out.status.code().unwrap_or(-1),
             tail(&out.stdout), tail(&out.stderr));
-        Ok((classify(out.status.code().unwrap_or(-1), &log), log))
+        let own = module_path(&tree.join(module_root));
+        Ok((classify(out.status.code().unwrap_or(-1), &log, own.as_deref()), log))
     }
 
     /// Download every module `tree` needs into the shared cache, with
@@ -324,17 +350,23 @@ pub fn validate(repo: &Path, out: &Path, cand: &Candidate, docker: &Docker) -> R
         rec.reason = "tests.patch does not apply to parent".into();
         rec.detail = Some(err.chars().take(400).collect());
     } else {
+        let short = &cand.sha[..12];
         let mut infra = None;
         for (name, tree) in [("parent", &parent), ("commit", &commit)] {
+            println!("[mine]   {short} {name}: go mod download");
             let (ok, log) = docker.download(tree, &cand.module_root)?;
             if !ok {
                 infra = Some(format!("{name}: go mod download failed: {}",
                                      log.chars().rev().take(300).collect::<String>().chars().rev().collect::<String>()));
             }
         }
+        println!("[mine]   {short} parent: go test {}", cand.packages.join(" "));
         let (parent_out, parent_log) = docker.go_test(&parent, &cand.module_root, &cand.packages)?;
+        println!("[mine]   {short} parent: {parent_out:?}");
         std::fs::write(tdir.join("parent.log"), parent_log)?;
+        println!("[mine]   {short} commit: go test {}", cand.packages.join(" "));
         let (commit_out, commit_log) = docker.go_test(&commit, &cand.module_root, &cand.packages)?;
+        println!("[mine]   {short} commit: {commit_out:?}");
         std::fs::write(tdir.join("commit.log"), commit_log)?;
         let (valid, reason) = decide(parent_out, commit_out);
         rec.valid = valid;
@@ -383,8 +415,10 @@ pub fn mine(repo: &Path, out: &Path, cands: Vec<Candidate>, jobs: usize, docker:
             s.spawn(|| loop {
                 let i = next.fetch_add(1, Ordering::SeqCst);
                 let Some(c) = cands.get(i) else { break };
+                println!("[mine] start {} {}", &c.sha[..12], c.subject.chars().take(60).collect::<String>());
+                let res = validate(repo, out, c, docker);
                 let n = done.fetch_add(1, Ordering::SeqCst) + 1;
-                match validate(repo, out, c, docker) {
+                match res {
                     Ok(r) => {
                         println!("[mine] {n}/{} {} valid={} ({}, {}s) {}", cands.len(), &c.sha[..12],
                                  r.valid, r.reason, r.seconds, c.subject.chars().take(60).collect::<String>());
@@ -429,9 +463,39 @@ mod tests {
 
     #[test]
     fn a_module_download_failure_is_infra_not_a_failing_test() {
-        assert_eq!(classify(1, REAL_INFRA_LOG), Outcome::Infra);
-        assert_eq!(classify(1, "x.go:3:2: missing go.sum entry for module providing package y"),
+        assert_eq!(classify(1, REAL_INFRA_LOG, Some("github.com/candacelabs/candace")), Outcome::Infra);
+        assert_eq!(classify(1, "x.go:3:2: missing go.sum entry for module providing package y", None),
                    Outcome::Infra);
+    }
+
+    // Regression, 2026-09-30 (task 42fe7c3aa0b1): a new test importing a
+    // package of the module under test that the parent lacks is reported as
+    // "cannot find module providing package <own>/...: module lookup
+    // disabled". That is the code failing to build, not infrastructure.
+    const REAL_OWN_PACKAGE_LOG: &str = "FAIL\n\
+        go: finding module for package github.com/candacelabs/csf/services/warden/internal/transportidentity\n\
+        # github.com/candacelabs/csf/services/warden/election\n\
+        services/warden/election/harness_test.go:15:2: cannot find module providing package \
+        github.com/candacelabs/csf/services/warden/internal/transportidentity: module lookup disabled by GOPROXY=off\n";
+
+    #[test]
+    fn a_missing_package_of_the_module_itself_is_a_build_failure() {
+        assert_eq!(classify(1, REAL_OWN_PACKAGE_LOG, Some("github.com/candacelabs/csf")),
+                   Outcome::BuildFail);
+        // The same line naming a THIRD-PARTY module is still infrastructure.
+        assert_eq!(classify(1, REAL_OWN_PACKAGE_LOG, Some("github.com/other/module")), Outcome::Infra);
+        assert_eq!(classify(1, REAL_OWN_PACKAGE_LOG, None), Outcome::Infra);
+        // Own-module blame never hides a real download failure elsewhere.
+        let both = format!("{REAL_OWN_PACKAGE_LOG}\n{REAL_INFRA_LOG}");
+        assert_eq!(classify(1, &both, Some("github.com/candacelabs/csf")), Outcome::Infra);
+    }
+
+    #[test]
+    fn module_path_reads_go_mod() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("go.mod"), "// c\nmodule github.com/candacelabs/csf\n\ngo 1.26\n").unwrap();
+        assert_eq!(module_path(d.path()).as_deref(), Some("github.com/candacelabs/csf"));
+        assert!(module_path(&d.path().join("missing")).is_none());
     }
 
     #[test]
@@ -456,15 +520,15 @@ mod tests {
 
     #[test]
     fn real_failures_classify_as_failures() {
-        assert_eq!(classify(0, "ok  \tpkg\t0.1s"), Outcome::Pass);
-        assert_eq!(classify(1, "--- FAIL: TestX (0.00s)\nFAIL\tpkg\t0.1s"), Outcome::TestFail);
-        assert_eq!(classify(1, "Ran 3 of 3 Specs\n[FAIL] Mailbox rejects duplicates\nFAIL\tpkg"),
+        assert_eq!(classify(0, "ok  \tpkg\t0.1s", None), Outcome::Pass);
+        assert_eq!(classify(1, "--- FAIL: TestX (0.00s)\nFAIL\tpkg\t0.1s", None), Outcome::TestFail);
+        assert_eq!(classify(1, "Ran 3 of 3 Specs\n[FAIL] Mailbox rejects duplicates\nFAIL\tpkg", None),
                    Outcome::TestFail);
         assert_eq!(classify(1, "# pkg [pkg.test]\n./a_test.go:9:5: undefined: NewThing\n\
-                               FAIL\tpkg [build failed]"), Outcome::BuildFail);
-        assert_eq!(classify(137, ""), Outcome::Timeout);
+                               FAIL\tpkg [build failed]", None), Outcome::BuildFail);
+        assert_eq!(classify(137, "", None), Outcome::Timeout);
         // An exit with nothing recognizable is not evidence of a failing test.
-        assert_eq!(classify(1, "something odd"), Outcome::Infra);
+        assert_eq!(classify(1, "something odd", None), Outcome::Infra);
     }
 
     #[test]
