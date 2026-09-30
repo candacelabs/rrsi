@@ -31,6 +31,15 @@
 //! commit.log} and DIR/index.jsonl. It is resume-safe: a candidate with a
 //! task.json is kept. The output holds the repository's code: keep DIR out of
 //! any public repository.
+//!
+//! The fairness stages (src/fairness.rs) then decide which valid tasks are
+//! fair exam questions and write DIR/<sha12>/fairness/<stage>.json,
+//! DIR/<sha12>/instruction.md and DIR/exam.jsonl:
+//!
+//! ```text
+//! rrsi-mine fairness --tasks DIR --repo PATH [--jobs 2] [--only SHA12] [--force]
+//! rrsi-mine flake|api|describe|probe|specificity|gate --tasks DIR ...
+//! ```
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -456,6 +465,7 @@ pub fn mine(repo: &Path, out: &Path, cands: Vec<Candidate>, jobs: usize, docker:
     Ok(())
 }
 
+pub mod fairness;
 pub mod llm;
 pub mod scan;
 
