@@ -1,0 +1,444 @@
+<!doctype html>
+<!--
+Copyright 2026 Candace Labs
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+Template of rrsi-report (src/bin/rrsi-report.rs). The binary replaces the
+data slot below with one JSON document; everything else is static.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RRSI task exam</title>
+<style>
+:root {
+  color-scheme: light;
+  --bg: #fcfcfb; --panel: #ffffff; --border: #e3e2de; --ink: #0b0b0b; --ink-2: #52514e; --ink-3: #7a7974;
+  --evolve: #2a78d6; --heldout: #eb6834; --excluded: #a3a29d; --mine: #1baf7a; --fair: #4a3aa7;
+  --pass: #008300; --fail: #c62f2e; --code-bg: #f4f3f0; --chip-bg: #efeeea; --warn-bg: #fff4d6;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #1a1a19; --panel: #222221; --border: #3a3a37; --ink: #ffffff; --ink-2: #c3c2b7; --ink-3: #97968e;
+    --evolve: #3987e5; --heldout: #d95926; --excluded: #6e6d68; --mine: #199e70; --fair: #9085e9;
+    --pass: #4cbb4c; --fail: #e66767; --code-bg: #2b2b29; --chip-bg: #2e2e2c; --warn-bg: #3d3420;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #1a1a19; --panel: #222221; --border: #3a3a37; --ink: #ffffff; --ink-2: #c3c2b7; --ink-3: #97968e;
+  --evolve: #3987e5; --heldout: #d95926; --excluded: #6e6d68; --mine: #199e70; --fair: #9085e9;
+  --pass: #4cbb4c; --fail: #e66767; --code-bg: #2b2b29; --chip-bg: #2e2e2c; --warn-bg: #3d3420;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1200px; margin: 0 auto; padding: 24px 16px 64px; }
+h1 { font-size: 1.6rem; margin: 0 0 4px; }
+h2 { font-size: 1.15rem; margin: 0 0 4px; }
+h3 { font-size: 1rem; margin: 0 0 6px; }
+p.lede, .muted { color: var(--ink-2); }
+section { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  padding: 16px; margin: 16px 0; min-width: 0; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 460px), 1fr)); gap: 16px; }
+.grid2 > section { margin: 0; }
+.stats { display: flex; flex-wrap: wrap; gap: 8px 24px; margin: 12px 0 0; }
+.stat b { display: block; font-size: 1.5rem; font-variant-numeric: tabular-nums; }
+.stat span { color: var(--ink-2); font-size: .85rem; }
+.chart { width: 100%; min-height: 60px; overflow-x: auto; }
+.banner { background: var(--warn-bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin: 12px 0; }
+.hidden { display: none !important; }
+.swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: baseline; }
+.s-evolve { background: var(--evolve); } .s-heldout { background: var(--heldout); } .s-excluded { background: var(--excluded); }
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0 12px; }
+.controls input { flex: 1 1 240px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg); color: var(--ink); font: inherit; }
+.chip { border: 1px solid var(--border); background: var(--chip-bg); color: var(--ink); border-radius: 999px;
+  padding: 4px 12px; font: inherit; font-size: .85rem; cursor: pointer; }
+.chip[aria-pressed="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: .88rem; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { color: var(--ink-2); font-weight: 600; position: sticky; top: 0; background: var(--panel); }
+tbody tr.row { cursor: pointer; }
+tbody tr.row:hover, tbody tr.row.open { background: var(--chip-bg); }
+td.nw { white-space: nowrap; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+code, pre, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .82rem; }
+pre { background: var(--code-bg); padding: 10px; border-radius: 6px; overflow: auto; max-height: 420px;
+  white-space: pre; margin: 6px 0; }
+pre.wrap { white-space: pre-wrap; word-break: break-word; }
+.card { border: 1px solid var(--border); border-radius: 10px; padding: 14px; background: var(--bg); min-width: 0; }
+.card .meta { color: var(--ink-2); font-size: .85rem; margin-bottom: 8px; }
+.card dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 8px 0; font-size: .88rem; }
+.card dt { color: var(--ink-2); }
+.card dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+details { margin: 6px 0; }
+summary { cursor: pointer; color: var(--ink-2); font-weight: 600; }
+details.spoiler > summary { color: var(--fail); }
+.verdict { display: inline-block; font-size: .8rem; padding: 1px 8px; border-radius: 999px; margin: 2px 4px 2px 0;
+  border: 1px solid var(--border); }
+.verdict.pass { color: var(--pass); } .verdict.fail { color: var(--fail); } .verdict.none { color: var(--ink-3); }
+.examples { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr)); gap: 12px; }
+.split-tag { font-size: .8rem; font-weight: 600; white-space: nowrap; }
+footer { color: var(--ink-3); font-size: .8rem; margin-top: 24px; }
+</style>
+</head>
+<body>
+<main>
+<header>
+  <h1>RRSI task exam</h1>
+  <p class="lede" id="rule"></p>
+  <p class="muted" id="generated"></p>
+  <div class="stats" id="stats"></div>
+  <div class="banner hidden" id="vega-missing" role="alert">
+    Charts could not load: the pinned Vega scripts from cdn.jsdelivr.net did not load or failed their
+    integrity check (offline, blocked, or tampered). Every number is still in the task browser below.
+  </div>
+  <div class="banner hidden" id="fairness-missing">
+    Fairness not run yet: no task has a <code>fairness/gate.json</code>, so exam-ready means FAIL_TO_PASS valid.
+    Stage verdicts, instructions and the required API appear here once the fairness stages write them.
+  </div>
+  <noscript><div class="banner">This report draws its charts and task browser with JavaScript.</div></noscript>
+</header>
+
+<div class="grid2">
+  <section><h2>Funnel</h2><p class="muted">From mined candidates to the two exam splits.</p><div class="chart" id="c-funnel"></div></section>
+  <section><h2>Rejections</h2><p class="muted">Why tasks left the funnel: miner reasons and each failing fairness stage.</p><div class="chart" id="c-reject"></div></section>
+</div>
+
+<section><h2>Timeline</h2><p class="muted" id="timeline-note">One dot per task at its commit date; height is source churn. The dashed rule marks the held-out cutoff.</p><div class="chart" id="c-timeline"></div></section>
+
+<div class="grid2">
+  <section><h2>Split balance</h2><p class="muted">Tasks per area (first three path segments of the primary package) and split.</p><div class="chart" id="c-balance"></div></section>
+  <section><h2>Difficulty</h2><p class="muted">Source churn (lines changed, log scale) per split, then how the hidden tests failed on the parent.</p><div class="chart" id="c-churn"></div><div class="chart" id="c-trans"></div></section>
+</div>
+
+<section><h2>Examples</h2><p class="muted">Per split, the smallest-churn and the median-churn task. The reference fix stays collapsed.</p><div id="examples"></div></section>
+
+<section>
+  <h2>Task browser</h2>
+  <p class="muted">Click a row for its card.</p>
+  <div class="controls">
+    <input id="filter" type="search" placeholder="Filter by subject, sha, area, reason..." aria-label="Filter tasks">
+    <button class="chip" data-split="all" aria-pressed="true">all</button>
+    <button class="chip" data-split="evolve" aria-pressed="false"><span class="swatch s-evolve"></span>evolve</button>
+    <button class="chip" data-split="heldout" aria-pressed="false"><span class="swatch s-heldout"></span>held-out</button>
+    <button class="chip" data-split="excluded" aria-pressed="false"><span class="swatch s-excluded"></span>excluded</button>
+    <span class="muted" id="shown"></span>
+  </div>
+  <div class="tablewrap"><table>
+    <thead><tr><th>split</th><th>sha</th><th>date</th><th>area</th><th>subject</th><th>churn</th><th>parent &rarr; commit</th><th>fairness</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table></div>
+</section>
+<footer>Generated by rrsi-report. This page embeds private task source, tests and logs: keep it out of public places.</footer>
+</main>
+
+<script id="rrsi-data" type="application/json">__RRSI_DATA__</script>
+<script src="https://cdn.jsdelivr.net/npm/vega@5.33.1/build/vega.min.js" integrity="sha384-NMXhl2TbCXxcN7o4ROC56Funm78m4AylL8gMg/7Kn4YU+wrm23K9l7cY8lDRXQ9d" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/vega-lite@5.23.0/build/vega-lite.min.js" integrity="sha384-D9LYH0esGjcxQJsBuxOuXtCDJGXRWW1+KhluzWPqi0rLJmiR/ygPChefaD+rFFDQ" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/vega-embed@6.29.0/build/vega-embed.min.js" integrity="sha384-M+Ax7e/WFJpxSOF09HzI+Sj4wg9ottVd/uxmV2ItGGh02fLH28t2FAOJx3TJBap5" crossorigin="anonymous"></script>
+<script>
+(function () {
+"use strict";
+var D = JSON.parse(document.getElementById("rrsi-data").textContent);
+var S = D.summary, T = D.tasks;
+var STAGES = ["flake", "api", "describe", "probe", "specificity", "gate"];
+var SPLITS = ["evolve", "heldout", "excluded"];
+var LABEL = { evolve: "evolve", heldout: "held-out", excluded: "excluded" };
+var bySha = {};
+T.forEach(function (t) { bySha[t.sha12] = t; });
+
+function el(tag, attrs, kids) {
+  var e = document.createElement(tag);
+  if (attrs) Object.keys(attrs).forEach(function (k) {
+    if (k === "text") e.textContent = attrs[k];
+    else if (k === "cls") e.className = attrs[k];
+    else e.setAttribute(k, attrs[k]);
+  });
+  (kids || []).forEach(function (c) { if (c != null) e.appendChild(typeof c === "string" ? document.createTextNode(c) : c); });
+  return e;
+}
+function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+function day(t) { return t.date ? t.date.slice(0, 10) : ""; }
+function transition(t) { return (t.parent_outcome || "?") + " → " + (t.commit_outcome || "?"); }
+function fairnessSummary(t) {
+  var ran = STAGES.filter(function (s) { return t.fairness[s]; });
+  if (!ran.length) return "not run";
+  var failed = ran.filter(function (s) { return t.fairness[s].pass === false; });
+  if (t.fairness.gate) return (t.fairness.gate.pass ? "gate pass" : "gate fail") + (failed.length ? " (" + failed.join(", ") + ")" : "");
+  return ran.length + "/" + STAGES.length + " stages" + (failed.length ? ", failed " + failed.join(", ") : "");
+}
+
+// ---- header
+document.getElementById("rule").textContent = D.rule;
+document.getElementById("generated").textContent = "Generated " + D.generated_at +
+  (D.exam_lines != null ? " · exam.jsonl: " + D.exam_lines + " lines" : " · exam.jsonl not written yet") +
+  (D.has_dates ? "" : " · no --repo: commit dates unknown, held-out split by sha order");
+[["candidates", S.candidates], ["valid (FAIL_TO_PASS)", S.valid], ["pending retry", S.pending_retry],
+ ["fairness ran", S.fairness_ran], ["exam-ready", S.exam_ready], ["evolve", S.evolve], ["held-out", S.heldout]
+].forEach(function (p) {
+  document.getElementById("stats").appendChild(el("div", { cls: "stat" }, [el("b", { text: String(p[1]) }), el("span", { text: p[0] })]));
+});
+if (!S.fairness_ran) document.getElementById("fairness-missing").classList.remove("hidden");
+
+// ---- cards
+function verdicts(t) {
+  var box = el("div");
+  STAGES.forEach(function (s) {
+    var v = t.fairness[s];
+    var cls = !v ? "none" : v.pass === true ? "pass" : v.pass === false ? "fail" : "none";
+    var txt = s + ": " + (!v ? "not run" : v.pass === true ? "pass" : v.pass === false ? "fail" : "?");
+    var b = el("span", { cls: "verdict " + cls, text: txt });
+    if (v && v.reason) b.title = v.reason;
+    box.appendChild(b);
+  });
+  var reasons = STAGES.filter(function (s) { return t.fairness[s] && t.fairness[s].reason && t.fairness[s].pass === false; })
+    .map(function (s) { return s + ": " + t.fairness[s].reason; });
+  if (reasons.length) box.appendChild(el("pre", { cls: "wrap", text: reasons.join("\n") }));
+  return box;
+}
+function requiredApi(t) {
+  var api = t.fairness.api;
+  if (!api) return el("p", { cls: "muted", text: "Not computed yet (fairness/api.json absent)." });
+  var list = null;
+  Object.keys(api).forEach(function (k) {
+    var v = api[k];
+    if (!list && Array.isArray(v) && v.length && typeof v[0] === "object" && v[0] && "symbol" in v[0]) list = v;
+  });
+  if (list) return el("pre", { cls: "wrap", text: list.map(function (r) {
+    return r.signature || ((r.kind ? r.kind + " " : "") + r.symbol);
+  }).join("\n") });
+  var rest = {};
+  Object.keys(api).forEach(function (k) { if (k !== "stage" && k !== "pass" && k !== "reason") rest[k] = api[k]; });
+  return el("pre", { cls: "wrap", text: Object.keys(rest).length ? JSON.stringify(rest, null, 2) : "(no API listed)" });
+}
+function fold(label, text, cls) {
+  var d = el("details", cls ? { cls: cls } : null, [el("summary", { text: label }), el("pre", { text: text || "(empty)" })]);
+  return d;
+}
+function card(t) {
+  var c = el("div", { cls: "card" });
+  c.appendChild(el("h3", { text: t.subject || "(no subject)" }));
+  c.appendChild(el("div", { cls: "meta" }, [
+    el("span", { cls: "swatch s-" + t.split }), el("span", { cls: "split-tag", text: LABEL[t.split] }),
+    " · ", el("span", { cls: "mono", text: t.sha12 }), " · " + (day(t) || "no date") + " · " + t.area +
+    " · churn " + t.src_churn]));
+  var dl = el("dl");
+  function row(k, v) { dl.appendChild(el("dt", { text: k })); dl.appendChild(el("dd", null, [v])); }
+  row("outcome", transition(t) + (t.valid ? " (valid)" : " (" + t.reason + ")"));
+  if (t.excluded_reason) row("excluded", t.excluded_reason);
+  row("packages", t.module_root + ": " + t.packages.join(", "));
+  row("hidden tests", t.test_files.join(", ") || "-");
+  c.appendChild(dl);
+  c.appendChild(el("h3", { text: "Instruction" }));
+  c.appendChild(t.instruction ? el("pre", { cls: "wrap", text: t.instruction }) : el("p", { cls: "muted", text: "Not written yet (instruction.md absent)." }));
+  c.appendChild(el("h3", { text: "Required API" }));
+  c.appendChild(requiredApi(t));
+  c.appendChild(el("h3", { text: "Fairness" }));
+  c.appendChild(verdicts(t));
+  c.appendChild(fold("Hidden tests (tests.patch)", t.tests_patch));
+  c.appendChild(fold("SPOILER: the reference fix", t.src_patch, "spoiler"));
+  c.appendChild(fold("parent.log (tail)", t.parent_log_tail));
+  c.appendChild(fold("commit.log (tail)", t.commit_log_tail));
+  return c;
+}
+
+// ---- examples
+var ex = document.getElementById("examples");
+SPLITS.forEach(function (s) {
+  var picks = (D.examples[s] || []).map(function (h) { return bySha[h]; }).filter(Boolean);
+  var wrap = el("div", null, [el("h3", null, [el("span", { cls: "swatch s-" + s }), LABEL[s]])]);
+  var grid = el("div", { cls: "examples" });
+  if (!picks.length) grid.appendChild(el("p", { cls: "muted", text: "No tasks in this split." }));
+  picks.forEach(function (t) { grid.appendChild(card(t)); });
+  wrap.appendChild(grid);
+  wrap.style.marginBottom = "16px";
+  ex.appendChild(wrap);
+});
+
+// ---- browser
+var rows = document.getElementById("rows"), filter = document.getElementById("filter"), chosen = "all";
+var order = T.slice().sort(function (a, b) {
+  var sa = SPLITS.indexOf(a.split), sb = SPLITS.indexOf(b.split);
+  if (sa !== sb) return sa - sb;
+  if ((b.ts || 0) !== (a.ts || 0)) return (b.ts || 0) - (a.ts || 0);
+  return a.sha < b.sha ? -1 : 1;
+});
+var trs = order.map(function (t) {
+  var tr = el("tr", { cls: "row" }, [
+    el("td", null, [el("span", { cls: "swatch s-" + t.split }), el("span", { cls: "split-tag", text: LABEL[t.split] })]),
+    el("td", { cls: "mono nw", text: t.sha12 }), el("td", { cls: "nw", text: day(t) || "-" }), el("td", { text: t.area }),
+    el("td", { text: t.subject }), el("td", { cls: "num", text: String(t.src_churn) }),
+    el("td", { cls: "nw", text: transition(t) }), el("td", { text: fairnessSummary(t) })]);
+  tr.dataset.split = t.split;
+  tr.dataset.hay = [t.sha12, t.subject, t.area, t.reason, t.excluded_reason || "", t.split, day(t), transition(t)].join(" ").toLowerCase();
+  var detail = null;
+  tr.addEventListener("click", function () {
+    if (detail) { detail.remove(); detail = null; tr.classList.remove("open"); return; }
+    detail = el("tr", { cls: "detail" }, [el("td", { colspan: "8" }, [card(t)])]);
+    tr.after(detail); tr.classList.add("open");
+  });
+  tr._detail = function () { return detail; };
+  rows.appendChild(tr);
+  return tr;
+});
+function apply() {
+  var q = filter.value.trim().toLowerCase(), n = 0;
+  trs.forEach(function (tr) {
+    var ok = (chosen === "all" || tr.dataset.split === chosen) && (!q || tr.dataset.hay.indexOf(q) >= 0);
+    tr.classList.toggle("hidden", !ok);
+    var d = tr._detail(); if (d) d.classList.toggle("hidden", !ok);
+    if (ok) n++;
+  });
+  document.getElementById("shown").textContent = n + " of " + trs.length + " shown";
+}
+filter.addEventListener("input", apply);
+document.querySelectorAll(".chip").forEach(function (b) {
+  b.addEventListener("click", function () {
+    chosen = b.dataset.split;
+    document.querySelectorAll(".chip").forEach(function (x) { x.setAttribute("aria-pressed", String(x === b)); });
+    apply();
+  });
+});
+apply();
+
+// ---- charts
+if (typeof vegaEmbed === "undefined") {
+  document.getElementById("vega-missing").classList.remove("hidden");
+  document.querySelectorAll(".chart").forEach(function (c) { c.appendChild(el("p", { cls: "muted", text: "Chart unavailable: Vega did not load." })); });
+  return;
+}
+var ink = css("--ink"), ink2 = css("--ink-2"), border = css("--border");
+var splitScale = { domain: SPLITS, range: [css("--evolve"), css("--heldout"), css("--excluded")] };
+var splitLegend = { labelExpr: "datum.label === 'heldout' ? 'held-out' : datum.label" };
+var config = {
+  background: null, font: "system-ui, -apple-system, Segoe UI, sans-serif",
+  view: { stroke: null },
+  axis: { labelColor: ink2, titleColor: ink2, gridColor: border, domainColor: border, tickColor: border, labelFontSize: 11, titleFontWeight: 500 },
+  legend: { labelColor: ink2, titleColor: ink2, orient: "top" },
+  header: { labelColor: ink2, titleColor: ink2 },
+  text: { color: ink }, bar: { cornerRadiusEnd: 3 }
+};
+function draw(id, spec) {
+  spec.$schema = "https://vega.github.io/schema/vega-lite/v5.json";
+  spec.config = config;
+  if (!spec.width) spec.width = "container";
+  vegaEmbed("#" + id, spec, { actions: false, renderer: "svg" }).catch(function (e) {
+    document.getElementById(id).appendChild(el("p", { cls: "muted", text: "Chart failed: " + e }));
+  });
+}
+
+var funnel = [
+  { step: "candidates", n: S.candidates, kind: "all" },
+  { step: "valid", n: S.valid, kind: "all" },
+  { step: "exam-ready", n: S.exam_ready, kind: "all" },
+  { step: "evolve", n: S.evolve, kind: "evolve" },
+  { step: "held-out", n: S.heldout, kind: "heldout" }];
+draw("c-funnel", {
+  height: 190, data: { values: funnel },
+  encoding: { y: { field: "step", type: "nominal", sort: null, title: null },
+              x: { field: "n", type: "quantitative", title: "tasks" } },
+  layer: [
+    { mark: { type: "bar", height: { band: 0.7 } },
+      encoding: { color: { field: "kind", type: "nominal", legend: null,
+        scale: { domain: ["all", "evolve", "heldout"], range: [ink2, splitScale.range[0], splitScale.range[1]] } },
+        tooltip: [{ field: "step" }, { field: "n", title: "tasks" }] } },
+    { mark: { type: "text", align: "left", dx: 4, color: ink }, encoding: { text: { field: "n" } } }]
+});
+
+var rej = S.rejections.map(function (r) { return { reason: r[0], kind: r[1], n: r[2] }; });
+if (!rej.length) document.getElementById("c-reject").appendChild(el("p", { cls: "muted", text: "No rejections." }));
+else draw("c-reject", {
+  height: { step: 26 }, data: { values: rej },
+  encoding: { y: { field: "reason", type: "nominal", sort: "-x", title: null, axis: { labelLimit: 260 } },
+              x: { field: "n", type: "quantitative", title: "tasks" } },
+  layer: [
+    { mark: { type: "bar", height: { band: 0.7 } },
+      encoding: { color: { field: "kind", type: "nominal", title: "source",
+        scale: { domain: ["mine", "fairness"], range: [css("--mine"), css("--fair")] } },
+        tooltip: [{ field: "reason" }, { field: "kind", title: "source" }, { field: "n", title: "tasks" }] } },
+    { mark: { type: "text", align: "left", dx: 4, color: ink }, encoding: { text: { field: "n" } } }]
+});
+
+var dated = T.filter(function (t) { return t.date; }).map(function (t) {
+  return { date: t.date, split: t.split, subject: t.subject, sha: t.sha12, churn: Math.max(1, t.src_churn), area: t.area,
+           why: t.excluded_reason || "" };
+});
+if (!dated.length) {
+  document.getElementById("timeline-note").textContent = "No commit dates (run with --repo PATH): timeline skipped.";
+} else {
+  var layers = [{
+    mark: { type: "point", filled: true, size: 70, opacity: 0.85, stroke: css("--panel"), strokeWidth: 1 },
+    encoding: {
+      x: { field: "date", type: "temporal", title: "commit date" },
+      y: { field: "churn", type: "quantitative", scale: { type: "log" }, title: "source churn (log)" },
+      color: { field: "split", type: "nominal", scale: splitScale, legend: splitLegend, title: "split" },
+      tooltip: [{ field: "subject" }, { field: "sha" }, { field: "date", type: "temporal", format: "%Y-%m-%d %H:%M" },
+                { field: "split" }, { field: "area" }, { field: "churn" }, { field: "why", title: "excluded because" }] } }];
+  if (S.cutoff) layers.push({
+    data: { values: [{ cutoff: S.cutoff, label: "held-out cutoff" }] },
+    layer: [
+      { mark: { type: "rule", strokeDash: [5, 4], color: splitScale.range[1], strokeWidth: 1.5 },
+        encoding: { x: { field: "cutoff", type: "temporal" } } },
+      { mark: { type: "text", align: "right", dx: -4, dy: 8, baseline: "top", color: ink2, fontSize: 11 },
+        encoding: { x: { field: "cutoff", type: "temporal" }, y: { value: 0 }, text: { field: "label" } } }] });
+  draw("c-timeline", { height: 260, data: { values: dated }, layer: layers });
+}
+
+var bal = T.map(function (t) { return { area: t.area, split: t.split }; });
+draw("c-balance", {
+  height: { step: 20 }, data: { values: bal },
+  mark: { type: "bar", height: { band: 0.75 }, stroke: css("--panel"), strokeWidth: 1 },
+  encoding: {
+    y: { field: "area", type: "nominal", sort: "-x", title: null, axis: { labelLimit: 240 } },
+    x: { aggregate: "count", type: "quantitative", title: "tasks" },
+    color: { field: "split", type: "nominal", scale: splitScale, legend: splitLegend, title: "split" },
+    order: { field: "split", sort: "ascending" },
+    tooltip: [{ field: "area" }, { field: "split" }, { aggregate: "count", title: "tasks" }] }
+});
+
+var churn = T.map(function (t) { return { split: t.split, churn: Math.max(1, t.src_churn), subject: t.subject, sha: t.sha12 }; });
+draw("c-churn", {
+  height: { step: 44 }, data: { values: churn },
+  encoding: { y: { field: "split", type: "nominal", sort: SPLITS, title: null, axis: { labelExpr: splitLegend.labelExpr } },
+              x: { field: "churn", type: "quantitative", scale: { type: "log" }, title: "source churn (lines, log)" } },
+  layer: [
+    { mark: { type: "boxplot", extent: 1.5, size: 26, opacity: 0.35, median: { color: ink }, outliers: false },
+      encoding: { color: { field: "split", type: "nominal", scale: splitScale, legend: null } } },
+    { mark: { type: "tick", thickness: 2, size: 18 },
+      encoding: { color: { field: "split", type: "nominal", scale: splitScale, legend: null },
+        tooltip: [{ field: "subject" }, { field: "sha" }, { field: "churn" }] } }]
+});
+
+var tr = T.filter(function (t) { return t.parent_outcome && t.commit_outcome; })
+  .map(function (t) { return { split: t.split, label: LABEL[t.split], transition: transition(t) }; });
+draw("c-trans", {
+  width: 360, height: { step: 18 }, data: { values: tr },
+  mark: { type: "bar", height: { band: 0.75 } },
+  encoding: {
+    row: { field: "label", type: "nominal", sort: SPLITS.map(function (x) { return LABEL[x]; }), title: null, header: { labelAngle: 0, labelAlign: "left" } },
+    y: { field: "transition", type: "nominal", title: null, sort: "-x" },
+    x: { aggregate: "count", type: "quantitative", title: "tasks (parent → commit outcome)" },
+    color: { field: "split", type: "nominal", scale: splitScale, legend: null },
+    tooltip: [{ field: "split" }, { field: "transition" }, { aggregate: "count", title: "tasks" }] },
+  resolve: { scale: { y: "independent" } }
+});
+})();
+</script>
+</body>
+</html>
