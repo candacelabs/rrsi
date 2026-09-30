@@ -18,7 +18,8 @@ use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use rrsi_mine::fairness::{self as fair, Task};
 use rrsi_mine::llm::{Copilot, ProcessRunner};
-use rrsi_mine::{candidates, miner, mine, Docker};
+use rrsi_mine::csf::{self, MineCsf};
+use rrsi_mine::{candidates, miner, mine, scan, Docker};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -37,6 +38,11 @@ enum Cmd {
         repo: PathBuf,
         #[arg(long, default_value = "2026-06-01")]
         since: String,
+        /// Print the commits that are NOT candidates, with the reason, instead.
+        #[arg(long)]
+        rejected: bool,
+        #[command(flatten)]
+        csf: CsfArgs,
     },
     /// Validate candidates in containers and write the task directory.
     Mine {
@@ -52,6 +58,13 @@ enum Cmd {
         limit: usize,
         #[command(flatten)]
         go: GoArgs,
+        #[command(flatten)]
+        csf: CsfArgs,
+    },
+    /// CSF integration: detection, guards and component annotation (CSF.md).
+    Csf {
+        #[command(subcommand)]
+        cmd: CsfCmd,
     },
     /// Fairness 1: re-run the commit tree's tests; every run must pass.
     Flake {
@@ -119,6 +132,142 @@ enum Cmd {
         #[command(flatten)]
         llm: LlmArgs,
     },
+}
+
+#[derive(Subcommand)]
+enum CsfCmd {
+    /// Is the repository CSF-instrumented at REV, and why. Exits 0 either way.
+    Detect {
+        #[arg(long)]
+        repo: PathBuf,
+        #[arg(long, default_value = "HEAD")]
+        rev: String,
+        /// Print the full detection as JSON.
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        gate: GateArgs,
+    },
+    /// Run CSF's gates on a checkout and print the verdicts as JSON.
+    Guard {
+        #[arg(long)]
+        tree: PathBuf,
+        #[command(flatten)]
+        gate: GateArgs,
+    },
+    /// Add the `csf` component map to every task.json under --tasks.
+    Annotate {
+        #[arg(long)]
+        tasks: PathBuf,
+        #[arg(long)]
+        repo: PathBuf,
+        #[command(flatten)]
+        csf: CsfArgs,
+    },
+}
+
+/// Finding and feeding CSF's compiler.
+#[derive(Args, Clone)]
+struct GateArgs {
+    /// csfc binary (else RRSI_CSFC, else `csfc` on PATH).
+    #[arg(long)]
+    csfc: Option<PathBuf>,
+    /// CSF grammar csfc reads (else RRSI_CSF_GRAMMAR, else the tree's own
+    /// csf/compiler/architecture/language.ebnf).
+    #[arg(long)]
+    csf_grammar: Option<PathBuf>,
+    /// An architecture source outside <root>/csf/architecture/architecture.csf
+    /// (repository-relative; repeatable).
+    #[arg(long)]
+    csf_source: Vec<String>,
+}
+
+/// Where the CSF model for mining comes from.
+#[derive(Args, Clone)]
+struct CsfArgs {
+    #[command(flatten)]
+    gate: GateArgs,
+    /// A `csfc emit --format json` document to map tasks onto, instead of
+    /// running csfc.
+    #[arg(long, requires = "csf_root")]
+    csf_model: Option<PathBuf>,
+    /// Repository-relative directory the --csf-model paths are relative to.
+    #[arg(long)]
+    csf_root: Option<String>,
+    /// Revision whose architecture csfc reads when there is no --csf-model.
+    #[arg(long, default_value = "HEAD")]
+    csf_model_rev: String,
+}
+
+impl CsfArgs {
+    fn resolve(&self, repo: &Path) -> Result<MineCsf> {
+        let file = self.csf_model.as_deref().map(|f| (f, self.csf_root.as_deref().unwrap_or("")));
+        MineCsf::resolve(repo, &self.csf_model_rev, self.gate.csfc.as_deref(), self.gate.csf_grammar.as_deref(),
+                         &self.gate.csf_source, file)
+    }
+}
+
+fn detect(repo: &Path, rev: &str, gate: &GateArgs) -> Result<csf::detect::Detection> {
+    let src = csf::source::Source::git(repo, rev)?;
+    let (mut d, files) = csf::detect::detect(&src, &gate.csf_source)?;
+    let info = csf::csfc::locate(gate.csfc.as_deref());
+    if info.available && d.csf_files.iter().any(|f| f.status != "other") {
+        let tree = csf::materialize(repo, rev)?;
+        csf::detect::with_csfc(&mut d, &files, tree.path(), info, gate.csf_grammar.as_deref())?;
+    } else {
+        d.csfc = Some(info);
+    }
+    Ok(d)
+}
+
+fn print_detection(d: &csf::detect::Detection) {
+    println!("instrumented: {}", if d.instrumented { "yes" } else { "no" });
+    for s in &d.signals {
+        println!("  signal {:<20} {} {}", s.signal, s.path, s.detail);
+    }
+    for m in &d.go_modules {
+        println!("  go module {:?} {} {}", m.root, m.module.as_deref().unwrap_or("?"),
+                 if m.requires_csf { "(requires csf)" } else { "" });
+    }
+    for f in &d.csf_files {
+        println!("  csf file {} [{}] {}", f.path, f.status, f.detail);
+        for g in f.diagnostics.iter().take(5) {
+            println!("    {}:{}:{}: {}: {}", g.file, g.line, g.col, g.code, g.message);
+        }
+    }
+    for m in &d.models {
+        println!("  model {} (root {:?}): {} components, {} generated roots", m.model.architecture.name, m.root,
+                 m.model.components.len(), m.model.generated_roots.len());
+    }
+    if let Some(c) = &d.csfc {
+        println!("  csfc: {} ({}; {})", c.path.as_deref().unwrap_or("none"),
+                 if c.available { "available" } else { "unavailable" }, c.detail);
+    }
+}
+
+/// Write `csf` into each task.json under `tasks`, keeping every other field.
+fn annotate(tasks: &Path, csf: &MineCsf) -> Result<()> {
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(tasks)?.flatten().map(|e| e.path())
+        .filter(|p| p.join("task.json").is_file()).collect();
+    dirs.sort();
+    let (mut n, mut mapped) = (0, 0);
+    for d in dirs {
+        let path = d.join("task.json");
+        let mut v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path)?)
+            .with_context(|| format!("parsing {}", path.display()))?;
+        let files: Vec<String> = v.get("src_files").and_then(|f| f.as_array())
+            .map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect()).unwrap_or_default();
+        let t = csf.task(&files);
+        mapped += t.as_ref().is_some_and(|t| !t.components.is_empty()) as usize;
+        n += 1;
+        match t {
+            Some(t) => v["csf"] = serde_json::to_value(t)?,
+            None => { v.as_object_mut().map(|o| o.remove("csf")); }
+        }
+        std::fs::write(&path, serde_json::to_string_pretty(&v)?)?;
+    }
+    println!("[csf] annotated {n} task(s); {mapped} map to at least one CSF component");
+    Ok(())
 }
 
 #[derive(Args)]
@@ -193,19 +342,55 @@ fn gate(s: &StageArgs, tasks: &[Task]) -> Result<()> {
 
 fn main() -> Result<()> {
     match Cli::parse().cmd {
-        Cmd::List { repo, since } => {
-            for c in candidates(&repo, &since)? {
-                println!("{}", serde_json::to_string(&c)?);
+        Cmd::List { repo, since, rejected, csf } => {
+            let repo = canonical(&repo)?;
+            let (cands, rejections) = scan(&repo, &since, &csf.resolve(&repo)?)?;
+            if rejected {
+                for r in rejections {
+                    println!("{}", serde_json::to_string(&r)?);
+                }
+            } else {
+                for c in cands {
+                    println!("{}", serde_json::to_string(&c)?);
+                }
             }
         }
-        Cmd::Mine { repo, out, since, jobs, limit, go } => {
-            let repo = repo.canonicalize().context("--repo")?;
-            let mut cands = candidates(&repo, &since)?;
+        Cmd::Mine { repo, out, since, jobs, limit, go, csf } => {
+            let repo = canonical(&repo)?;
+            let csf = csf.resolve(&repo)?;
+            println!("[mine] {}", csf.describe());
+            let (mut cands, rejections) = scan(&repo, &since, &csf)?;
             if limit > 0 {
                 cands.truncate(limit);
             }
-            mine(&repo, &out, cands, jobs, &go.docker())?;
+            mine(&repo, &out, cands, jobs, &go.docker(), &csf)?;
+            let mut f = std::fs::File::create(out.join("rejected.jsonl"))?;
+            for r in &rejections {
+                use std::io::Write;
+                writeln!(f, "{}", serde_json::to_string(r)?)?;
+            }
+            println!("[mine] {} commit(s) rejected before validation (rejected.jsonl)", rejections.len());
         }
+        Cmd::Csf { cmd } => match cmd {
+            CsfCmd::Detect { repo, rev, json, gate } => {
+                let d = detect(&canonical(&repo)?, &rev, &gate)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&d)?);
+                } else {
+                    print_detection(&d);
+                }
+            }
+            CsfCmd::Guard { tree, gate } => {
+                let v = csf::guard::guard(&tree, gate.csfc.as_deref(), gate.csf_grammar.as_deref(), &gate.csf_source)?;
+                println!("{}", serde_json::to_string_pretty(&v)?);
+            }
+            CsfCmd::Annotate { tasks, repo, csf } => {
+                let repo = canonical(&repo)?;
+                let csf = csf.resolve(&repo)?;
+                println!("[csf] {}", csf.describe());
+                annotate(&tasks, &csf)?;
+            }
+        },
         Cmd::Flake { stage, repo, runs, go } => {
             let (repo, docker) = (canonical(&repo)?, go.docker());
             fair::run_stage("flake", &load(&stage)?, stage.jobs, stage.force,
