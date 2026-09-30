@@ -11,6 +11,32 @@
 > questions (the tests fail before the real fix and pass after it, offline) —
 > and it warns you when the final exam is not a fair test.
 >
+> **Things you can now try that were not possible before:**
+>
+> - **Hand an agent a real past bug from your own repo, as a proven-fair
+>   question.** Each of the 70 tasks gives the repo at the commit before the
+>   fix and hidden tests that are known to fail without it and pass with it;
+>   the fairness stages add a written instruction that never shows the fix
+>   (being generated for all 70 now).
+> - **Find tests that do not guard the change they shipped with.** 14 of 86
+>   commits added or changed tests that already passed *before* the change.
+>   For a pure refactor that is expected; for a bug fix it means the new test
+>   would not catch the bug coming back. The miner lists them.
+> - **See which parts of your codebase an exam covers**, per subsystem, per
+>   code layout and per fix size, before trusting any score on it.
+> - **Know in advance whether a final-exam result would mean anything.** The
+>   split-health checks flag a final exam that is harder, narrower or from a
+>   different part of the code than practice — here, 4 of 6 checks warned.
+> - **Grow the exam automatically.** Re-running the miner only processes new
+>   commits, so every merged fix with a test becomes a new candidate question.
+> - **Do it on any Go repository** (`--repo PATH`), with no API key: the
+>   search roles and the agent can run on a logged-in Copilot or Codex CLI, or
+>   a local model.
+> - *One step away (grader and harness not wired yet):* compare two agent
+>   setups — two models, two prompts, two tool sets — by pass rate on your own
+>   code instead of on public benchmarks, and let RRSI evolve the harness
+>   against the practice set while the final exam checks for memorizing.
+>
 > Not shown yet: whether RRSI then improves an agent on that exam. That needs
 > the baseline and RRSI rounds, and will replace this headline.
 >
