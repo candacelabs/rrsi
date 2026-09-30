@@ -380,15 +380,28 @@ pub fn validate(repo: &Path, out: &Path, cand: &Candidate, docker: &Docker) -> R
         }
     }
     rec.seconds = (t0.elapsed().as_secs_f64() * 10.0).round() / 10.0;
-    // An infra or timeout verdict is not a fact about the commit: leave no
-    // task.json so the next run retries it instead of reusing the verdict.
+    write_record(&tdir, &rec)?;
+    Ok(rec)
+}
+
+/// Record a validation in `tdir`. An infra or timeout verdict is not a fact
+/// about the commit: it goes to retry.json and no task.json is written, so
+/// the next run retries it instead of reusing the verdict. A final verdict
+/// goes to task.json and removes any retry.json an earlier attempt left, so
+/// a task directory never holds both.
+pub fn write_record(tdir: &Path, rec: &TaskRecord) -> Result<()> {
+    let json = serde_json::to_string_pretty(rec)?;
     if matches!(rec.parent_outcome, Some(Outcome::Infra | Outcome::Timeout))
         || matches!(rec.commit_outcome, Some(Outcome::Infra | Outcome::Timeout)) {
-        std::fs::write(tdir.join("retry.json"), serde_json::to_string_pretty(&rec)?)?;
+        std::fs::write(tdir.join("retry.json"), json)?;
     } else {
-        std::fs::write(&task_json, serde_json::to_string_pretty(&rec)?)?;
+        std::fs::write(tdir.join("task.json"), json)?;
+        match std::fs::remove_file(tdir.join("retry.json")) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+            _ => {}
+        }
     }
-    Ok(rec)
+    Ok(())
 }
 
 /// The git work tree containing `path` (or its nearest existing ancestor),
@@ -543,6 +556,29 @@ mod tests {
         let err = mine(d.path(), &inside, vec![], 1, &docker).unwrap_err();
         assert!(format!("{err}").contains("inside the git work tree"));
         assert!(!inside.exists(), "nothing may be created inside the work tree");
+    }
+
+    // Regression, 2026-09-30: a task retried after an infra run kept its
+    // stale retry.json next to the new task.json.
+    #[test]
+    fn a_final_verdict_removes_the_earlier_retry_record() {
+        let d = tempfile::tempdir().unwrap();
+        let cand = Candidate { sha: "a".repeat(40), parent: "b".repeat(40), subject: "s".into(),
+                               body: String::new(), module_root: "m".into(), packages: vec![],
+                               src_files: vec![], test_files: vec![], src_churn: 1 };
+        let rec = |parent, commit| TaskRecord {
+            cand: cand.clone(), valid: false, reason: String::new(), fails_before: None,
+            passes_after: None, parent_outcome: Some(parent), commit_outcome: Some(commit),
+            detail: None, seconds: 0.0 };
+        write_record(d.path(), &rec(Outcome::BuildFail, Outcome::Infra)).unwrap();
+        assert!(d.path().join("retry.json").is_file() && !d.path().join("task.json").exists());
+        write_record(d.path(), &rec(Outcome::BuildFail, Outcome::Pass)).unwrap();
+        assert!(d.path().join("task.json").is_file());
+        assert!(!d.path().join("retry.json").exists(), "never both files");
+        // A first-time final verdict with no retry.json is fine too.
+        let fresh = tempfile::tempdir().unwrap();
+        write_record(fresh.path(), &rec(Outcome::TestFail, Outcome::Pass)).unwrap();
+        assert!(fresh.path().join("task.json").is_file());
     }
 
     #[test]
