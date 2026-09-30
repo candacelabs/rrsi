@@ -20,7 +20,10 @@
 //! rrsi_mine.export_tree(repo, sha, dest)
 //! rrsi_mine.apply_patch(tree, patch) -> str | None   (error text, or None)
 //! rrsi_mine.go_test(tree, module_root, packages, image=..., modcache=...,
-//!                   buildcache=..., timeout=600) -> (passed, log)
+//!                   buildcache=..., timeout=600) -> (outcome, log)
+//! rrsi_mine.decide(parent_outcome, commit_outcome) -> (valid, reason)
+//! rrsi_mine.load_exam(tasks_dir) -> list[dict]   (exam-ready tasks: sha, sha12,
+//!                   parent, module_root, packages, instruction)
 //! ```
 
 use pyo3::exceptions::PyRuntimeError;
@@ -77,6 +80,17 @@ fn decide(parent: &str, commit: &str) -> PyResult<(bool, &'static str)> {
     Ok(crate::decide(outcome(parent)?, outcome(commit)?))
 }
 
+/// The exam-ready tasks of a fairness-checked task directory, judged afresh
+/// from the stage verdicts: what the agent sees (`instruction`) and what the
+/// harness needs to check it (sha, parent, module_root, packages).
+#[pyfunction]
+fn load_exam(py: Python<'_>, tasks_dir: &str) -> PyResult<PyObject> {
+    let exam = py.allow_threads(|| crate::fairness::load_exam(Path::new(tasks_dir))).map_err(err)?;
+    let json = serde_json::to_string(&exam).map_err(|e| err(e.into()))?;
+    let loads = PyModule::import(py, "json")?.getattr("loads")?;
+    Ok(loads.call1((json,))?.unbind())
+}
+
 #[pymodule]
 fn rrsi_mine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(list_candidates, m)?)?;
@@ -84,5 +98,6 @@ fn rrsi_mine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(apply_patch, m)?)?;
     m.add_function(wrap_pyfunction!(go_test, m)?)?;
     m.add_function(wrap_pyfunction!(decide, m)?)?;
+    m.add_function(wrap_pyfunction!(load_exam, m)?)?;
     Ok(())
 }

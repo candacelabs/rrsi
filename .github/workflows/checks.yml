@@ -58,3 +58,24 @@ jobs:
           assert rrsi_mine.decide("BuildFail", "Pass")[0] and rrsi_mine.decide("TestFail", "Pass")[0]
           assert not rrsi_mine.decide("Pass", "Pass")[0]
           PY
+      - name: pyo3 load_exam returns only exam-ready tasks
+        run: |
+          python - <<'PY'
+          import json, pathlib, tempfile
+          import rrsi_mine
+          root = pathlib.Path(tempfile.mkdtemp())
+          for name, ready in (("aaaaaaaaaaaa", True), ("bbbbbbbbbbbb", False)):
+              d = root / name
+              (d / "fairness").mkdir(parents=True)
+              (d / "task.json").write_text(json.dumps({
+                  "sha": name + "0" * 28, "parent": "1" * 40, "subject": "s", "body": "",
+                  "module_root": "m", "packages": ["./p"], "src_files": [], "test_files": [],
+                  "src_churn": 1, "valid": True, "reason": "ok", "seconds": 0.0}))
+              for stage in ("flake", "describe", "probe", "specificity"):
+                  (d / "fairness" / f"{stage}.json").write_text(json.dumps(
+                      {"stage": stage, "pass": ready or stage != "probe", "reason": ""}))
+              (d / "instruction.md").write_text("# Title\n")
+          exam = rrsi_mine.load_exam(str(root))
+          assert [e["sha12"] for e in exam] == ["aaaaaaaaaaaa"], exam
+          assert exam[0]["instruction"] == "# Title\n" and exam[0]["packages"] == ["./p"]
+          PY
