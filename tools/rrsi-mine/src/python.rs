@@ -56,9 +56,25 @@ fn apply_patch(py: Python<'_>, tree: &str, patch: &str) -> PyResult<Option<Strin
                     timeout = 600))]
 #[allow(clippy::too_many_arguments)]
 fn go_test(py: Python<'_>, tree: &str, module_root: &str, packages: Vec<String>, image: &str,
-           modcache: &str, buildcache: &str, timeout: u64) -> PyResult<(bool, String)> {
+           modcache: &str, buildcache: &str, timeout: u64) -> PyResult<(String, String)> {
     let docker = crate::Docker { image, modcache, buildcache, test_timeout: timeout };
-    py.allow_threads(|| docker.go_test(Path::new(tree), module_root, &packages)).map_err(err)
+    let (outcome, log) = py.allow_threads(|| docker.go_test(Path::new(tree), module_root, &packages))
+        .map_err(err)?;
+    Ok((format!("{outcome:?}"), log))
+}
+
+fn outcome(name: &str) -> PyResult<crate::Outcome> {
+    use crate::Outcome::*;
+    Ok(match name {
+        "Pass" => Pass, "TestFail" => TestFail, "BuildFail" => BuildFail,
+        "Infra" => Infra, "Timeout" => Timeout,
+        _ => return Err(PyRuntimeError::new_err(format!("unknown outcome {name:?}"))),
+    })
+}
+
+#[pyfunction]
+fn decide(parent: &str, commit: &str) -> PyResult<(bool, &'static str)> {
+    Ok(crate::decide(outcome(parent)?, outcome(commit)?))
 }
 
 #[pymodule]
@@ -67,5 +83,6 @@ fn rrsi_mine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(export_tree, m)?)?;
     m.add_function(wrap_pyfunction!(apply_patch, m)?)?;
     m.add_function(wrap_pyfunction!(go_test, m)?)?;
+    m.add_function(wrap_pyfunction!(decide, m)?)?;
     Ok(())
 }
