@@ -168,8 +168,7 @@ where F: Fn(&Task) -> Result<Step> + Sync {
     let next = AtomicUsize::new(0);
     std::thread::scope(|s| {
         for _ in 0..jobs.max(1) {
-            s.spawn(|| loop {
-                let Some(t) = todo.get(next.fetch_add(1, Ordering::SeqCst)) else { break };
+            s.spawn(|| while let Some(t) = todo.get(next.fetch_add(1, Ordering::SeqCst)) {
                 if !force && is_fresh(&t.dir, stage) {
                     let v = read_verdict(&t.dir, stage).unwrap_or_default();
                     println!("[{stage}] {} {} {} (kept)", t.short(), pass_word(v["pass"].as_bool() == Some(true)),
