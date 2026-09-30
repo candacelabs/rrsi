@@ -19,6 +19,14 @@
 >   fix and hidden tests that are known to fail without it and pass with it;
 >   the fairness stages add a written instruction that never shows the fix
 >   (written for 66 of 70; 4 failed the leak check).
+> - **Measure how well your work is specified.** For each change, the fairness
+>   stages ask whether what was written down (commit message + tests) lets
+>   someone else rebuild it without guessing. Of 70 recent changes with valid
+>   tests: 25 (36%) were fully specified; 39 (56%) left a reader guessing
+>   behaviour or names (e.g. a "bounded grace" with no duration); 18 (26%) had
+>   tests pinning details no written spec states. Today this scores the recorded
+>   intent, a proxy for prompt quality; pointing it at the original prompts
+>   scores them directly (not wired yet).
 > - **Find tests that do not guard the change they shipped with.** 14 of 86
 >   commits added or changed tests that already passed *before* the change.
 >   For a pure refactor that is expected; for a bug fix it means the new test
