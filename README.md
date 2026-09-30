@@ -8,8 +8,9 @@
 >
 > **Now:** one command turns your repository's git history into a verified
 > exam — 86 recent commits in about 11 minutes on one machine, 70 of them proven
-> questions (the tests fail before the real fix and pass after it, offline) —
-> and it warns you when the final exam is not a fair test.
+> questions (the tests fail before the real fix and pass after it, offline),
+> 25 of which pass every fairness check — and it warns you when the final exam
+> is not a fair test.
 >
 > **Things you can now try that were not possible before:**
 >
@@ -17,7 +18,7 @@
 >   question.** Each of the 70 tasks gives the repo at the commit before the
 >   fix and hidden tests that are known to fail without it and pass with it;
 >   the fairness stages add a written instruction that never shows the fix
->   (being generated for all 70 now).
+>   (written for 66 of 70; 4 failed the leak check).
 > - **Find tests that do not guard the change they shipped with.** 14 of 86
 >   commits added or changed tests that already passed *before* the change.
 >   For a pure refactor that is expected; for a bug fix it means the new test
@@ -26,7 +27,8 @@
 >   code layout and per fix size, before trusting any score on it.
 > - **Know in advance whether a final-exam result would mean anything.** The
 >   split-health checks flag a final exam that is harder, narrower or from a
->   different part of the code than practice — here, 4 of 6 checks warned.
+>   different part of the code than practice — here, 4 of 6 checks warned on
+>   the first split and 2 of 6 after the fairness stages.
 > - **Grow the exam automatically.** Re-running the miner only processes new
 >   commits, so every merged fix with a test becomes a new candidate question.
 > - **Do it on any Go repository** (`--repo PATH`), with no API key: the
@@ -45,7 +47,8 @@
 > | Recent commits in our Go monorepo that change code + its tests | 86 candidates |
 > | ...that make a valid question (tests **fail** before the real fix, **pass** after, offline, pinned Go) | **70 of 86**; 14 dropped because the tests already passed before the fix, 2 because the commit itself did not build |
 > | Automatic check "is the final exam comparable to the practice set?" on the naive split (newest 10 held out) | **4 of 6 checks warn**: final-exam fixes 1.6x larger, 100% in one code layout vs 23%, half one subsystem, all from ~2 hours of work. A score on that split would not distinguish learning from memorizing. |
-> | Fairness stages on a 5-task sample (flaky tests, required API, instruction writing + leak check, independent solvability probe, over-specific tests) | 3 of 5 exam-ready; the probe rejected 2 for real ambiguities |
+> | Fairness stages on all 70 valid tasks (flaky tests, required API, instruction writing + leak check, independent solvability probe, over-specific tests) | **25 of 70 exam-ready**. Excluded: 25 by the probe alone (instruction ambiguous or names must be guessed), 10 by probe + over-specific tests, 6 by over-specific tests alone, 4 by the leak check. 0 flaky. |
+> | Exam after fairness (newest 10 exam-ready held out) | 15 practice + 10 final exam; split health 2 of 6 warn (final exam 0% vs practice 87% in the older `go/` layout). **15 practice tasks is too few for RRSI rounds** — next: mine further back and re-check the probe's strictness. |
 > | Toy domain end to end on a local 4B model (vLLM) | smoke 2/2 passed; loop, critic, sandbox and grader all run |
 > | Bugs the pipeline's own checks found and now pin with regression tests | download failures misread as failing tests; a new in-repo package misread as a download failure |
 >
