@@ -1,0 +1,277 @@
+{
+  "format": "csf-architecture",
+  "format_version": 1,
+  "architecture": {
+    "name": "shop",
+    "version": 1,
+    "at": {
+      "file": "csf/architecture/architecture.csf",
+      "line": 2,
+      "column": 1
+    }
+  },
+  "processes": [
+    {
+      "name": "host",
+      "kind": "go",
+      "entrypoint": "cmd/shop/main.go",
+      "at": {
+        "file": "csf/architecture/architecture.csf",
+        "line": 3,
+        "column": 3
+      }
+    },
+    {
+      "name": "db",
+      "kind": "external",
+      "entrypoint": null,
+      "at": {
+        "file": "csf/architecture/architecture.csf",
+        "line": 4,
+        "column": 3
+      }
+    }
+  ],
+  "scopes": [
+    {
+      "name": "app",
+      "parent": "host",
+      "process": "host",
+      "at": {
+        "file": "csf/architecture/architecture.csf",
+        "line": 5,
+        "column": 3
+      }
+    },
+    {
+      "name": "db_life",
+      "parent": "db",
+      "process": "db",
+      "at": {
+        "file": "csf/architecture/architecture.csf",
+        "line": 6,
+        "column": 3
+      }
+    }
+  ],
+  "components": [
+    {
+      "name": "wiring",
+      "kind": "manager",
+      "process": "host",
+      "scope": "app",
+      "source": "cmd/shop",
+      "state": "existing",
+      "lifecycle": "borrowed",
+      "verification": { "status": "pending", "test": null },
+      "at": {
+        "file": "csf/architecture/architecture.csf",
+        "line": 7,
+        "column": 3
+      }
+    },
+    {
+      "name": "orders",
+      "kind": "service",
+      "process": "host",
+      "scope": "app",
+      "source": "services/orders",
+      "state": "existing",
+      "lifecycle": "scoped",
+      "verification": {
+        "status": "test_reference",
+        "test": "services/orders/orders_test.go"
+      },
+      "at": {
+        "file": "csf/architecture/architecture.csf",
+        "line": 8,
+        "column": 3
+      }
+    },
+    {
+      "name": "money",
+      "kind": "library",
+      "process": "host",
+      "scope": "app",
+      "source": "pkg/money",
+      "state": "existing",
+      "lifecycle": "borrowed",
+      "verification": { "status": "pending", "test": null },
+      "at": {
+        "file": "csf/architecture/architecture.csf",
+        "line": 9,
+        "column": 3
+      }
+    },
+    {
+      "name": "mail",
+      "kind": "adapter",
+      "process": "host",
+      "scope": "app",
+      "source": "services/orders/mail",
+      "state": "existing",
+      "lifecycle": "scoped",
+      "verification": { "status": "pending", "test": null },
+      "at": {
+        "file": "csf/architecture/architecture.csf",
+        "line": 10,
+        "column": 3
+      }
+    },
+    {
+      "name": "sql",
+      "kind": "gateway",
+      "process": "host",
+      "scope": "app",
+      "source": "services/orders/store/sql.go",
+      "state": "existing",
+      "lifecycle": "borrowed",
+      "verification": { "status": "pending", "test": null },
+      "at": {
+        "file": "csf/architecture/architecture.csf",
+        "line": 11,
+        "column": 3
+      }
+    },
+    {
+      "name": "postgres",
+      "kind": "resource",
+      "process": "db",
+      "scope": "db_life",
+      "source": null,
+      "state": "existing",
+      "lifecycle": "borrowed",
+      "verification": { "status": "pending", "test": null },
+      "at": {
+        "file": "csf/architecture/architecture.csf",
+        "line": 12,
+        "column": 3
+      }
+    }
+  ],
+  "dependencies": [
+    {
+      "consumer": "wiring",
+      "provider": "orders",
+      "at": {
+        "file": "csf/architecture/architecture.csf",
+        "line": 13,
+        "column": 3
+      }
+    }
+  ],
+  "connections": [
+    {
+      "caller": "wiring",
+      "callee": "orders",
+      "transport": "call",
+      "boundary": null,
+      "state": "existing",
+      "at": {
+        "file": "csf/architecture/architecture.csf",
+        "line": 14,
+        "column": 3
+      }
+    },
+    {
+      "caller": "orders",
+      "callee": "sql",
+      "transport": "call",
+      "boundary": null,
+      "state": "existing",
+      "at": {
+        "file": "csf/architecture/architecture.csf",
+        "line": 15,
+        "column": 3
+      }
+    },
+    {
+      "caller": "sql",
+      "callee": "postgres",
+      "transport": "remote",
+      "boundary": "sql",
+      "state": "existing",
+      "at": {
+        "file": "csf/architecture/architecture.csf",
+        "line": 16,
+        "column": 3
+      }
+    }
+  ],
+  "scan_roots": [
+    {
+      "path": "cmd/shop",
+      "at": {
+        "file": "csf/architecture/architecture.csf",
+        "line": 17,
+        "column": 3
+      }
+    },
+    {
+      "path": "services",
+      "at": {
+        "file": "csf/architecture/architecture.csf",
+        "line": 18,
+        "column": 3
+      }
+    },
+    {
+      "path": "pkg",
+      "at": {
+        "file": "csf/architecture/architecture.csf",
+        "line": 19,
+        "column": 3
+      }
+    }
+  ],
+  "generated_roots": [
+    {
+      "path": "services/orders/api_cgen.go",
+      "at": {
+        "file": "csf/architecture/architecture.csf",
+        "line": 20,
+        "column": 3
+      }
+    },
+    {
+      "path": "csf/architecture/generated",
+      "at": {
+        "file": "csf/architecture/architecture.csf",
+        "line": 21,
+        "column": 3
+      }
+    }
+  ],
+  "obligations": [
+    {
+      "subject": "wiring",
+      "requirement": "Verify the declared borrowed ownership and lifetime contract; verification remains pending.",
+      "evidence": null
+    },
+    {
+      "subject": "orders",
+      "requirement": "Verify automatic scope cleanup, child cancellation and joining, and cleanup error reporting. A test reference is evidence to inspect, not proof that tests pass or execution guarantees hold.",
+      "evidence": "services/orders/orders_test.go"
+    },
+    {
+      "subject": "money",
+      "requirement": "Verify the declared borrowed ownership and lifetime contract; verification remains pending.",
+      "evidence": null
+    },
+    {
+      "subject": "mail",
+      "requirement": "Verify automatic scope cleanup, child cancellation and joining, and cleanup error reporting. A test reference is evidence to inspect, not proof that tests pass or execution guarantees hold.",
+      "evidence": null
+    },
+    {
+      "subject": "sql",
+      "requirement": "Verify the declared borrowed ownership and lifetime contract; verification remains pending.",
+      "evidence": null
+    },
+    {
+      "subject": "postgres",
+      "requirement": "Verify the declared borrowed ownership and lifetime contract; verification remains pending.",
+      "evidence": null
+    }
+  ]
+}
