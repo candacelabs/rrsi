@@ -167,9 +167,14 @@ fn bar_chart(rows: &[(String, [usize; 3])], x_title: &str, y_title: &str) -> Str
 /// The section, or `None` when no task carries CSF data. `figures` are the
 /// page's own, whose numbering this section continues.
 pub fn section(tasks: &[Task], csf: &BTreeMap<String, TaskInfo>, figures: &[Figure]) -> Option<String> {
-    let with: Vec<&Task> = tasks.iter().filter(|t| info(csf, t).is_some_and(|i| i.csf.is_some())).collect();
+    // A task mined from a CSF repository without a model (no csfc at the
+    // time) has a `csf` field with no models: it says nothing about
+    // components, so it is counted apart rather than as "touches none".
+    let csf_of = |t: &Task| info(csf, t).and_then(|i| i.csf.as_ref());
+    let with: Vec<&Task> = tasks.iter().filter(|t| csf_of(t).is_some_and(|c| !c.models.is_empty())).collect();
+    let no_model = tasks.iter().filter(|t| csf_of(t).is_some_and(|c| c.models.is_empty())).count();
     let guarded: Vec<&Task> = tasks.iter().filter(|t| info(csf, t).is_some_and(|i| i.guards.is_some())).collect();
-    if with.is_empty() && guarded.is_empty() {
+    if with.is_empty() && guarded.is_empty() && no_model == 0 {
         return None;
     }
     let next = |kind: &str| figures.iter().filter(|f| f.caption.kind == kind)
@@ -207,6 +212,11 @@ pub fn section(tasks: &[Task], csf: &BTreeMap<String, TaskInfo>, figures: &[Figu
         longest prefix of each changed file; CSF's compiler <code>csfc</code> then checks the fix's own commit tree.</p>",
         esc(&model.0), if model.1.is_empty() { String::new() } else { format!(", read at <code>{}</code>", esc(&model.1)) });
 
+    if no_model > 0 {
+        let _ = writeln!(h, "<p class=\"banner\">{no_model} task(s) come from a CSF repository but were mined without \
+            an architecture model (no csfc, or csfc rejected the model), so their components are unknown. \
+            Re-run <code>rrsi-mine csf annotate --csfc PATH</code> to add them.</p>");
+    }
     if !with.is_empty() {
         let top_note = match top {
             Some((name, c)) => format!("{} is touched most: {} task(s).", name, c.iter().sum::<usize>()),
@@ -420,6 +430,18 @@ mod tests {
         let tasks = load_tasks(d.path()).unwrap();
         let s = section(&tasks, &load(d.path()), &[]).unwrap();
         assert!(s.contains("All 1 failures are CSF_GENERATED_DRIFT only"), "{s}");
+    }
+
+    #[test]
+    fn tasks_mined_without_a_model_are_counted_apart() {
+        let d = tempfile::tempdir().unwrap();
+        let mut no_model = csf(&[]);
+        no_model["models"] = json!([]);
+        write(d.path(), "aaaaaaaaaaaa", true, json!({"csf": no_model}));
+        let tasks = load_tasks(d.path()).unwrap();
+        let s = section(&tasks, &load(d.path()), &[]).unwrap();
+        assert!(s.contains("1 task(s) come from a CSF repository but were mined without"), "{s}");
+        assert!(!s.contains("csf-components"), "no component chart without a model");
     }
 
     #[test]
