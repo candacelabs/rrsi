@@ -4,9 +4,12 @@
 
 ## Changes
 
-| Area | File | Change |
-|---|---|---|
-| | | |
+<!-- One row per change. Before and After describe behaviour, so that together
+they explain the Why. -->
+
+| Area | Before | After | Why |
+|---|---|---|---|
+| | | | |
 
 ## Verification
 
