@@ -92,8 +92,20 @@ fn pct(k: usize, n: usize) -> String {
     if n == 0 { "0%".into() } else { format!("{:.0}%", 100.0 * k as f64 / n as f64) }
 }
 
-fn caption(kind: &str, number: usize, title: &str, what: &str, unit: &str, n: &str, how: &str, takeaway: &str)
-    -> String {
+/// A numbered caption, in the page's own caption layout.
+struct Cap<'a> {
+    kind: &'a str,
+    number: usize,
+    title: &'a str,
+    what: &'a str,
+    unit: &'a str,
+    n: &'a str,
+    how: &'a str,
+    takeaway: &'a str,
+}
+
+fn caption(c: Cap) -> String {
+    let Cap { kind, number, title, what, unit, n, how, takeaway } = c;
     format!("<figcaption><span class=\"fn\">{kind} {number}. </span><span class=\"ft\">{}. </span>{} Unit: {}. n: {}. \
              Computed: {}.<span class=\"tk\"><b>Takeaway: </b>{}</span></figcaption>",
             esc(title), esc(what), esc(unit), esc(n), esc(how), esc(takeaway))
@@ -190,9 +202,9 @@ pub fn section(tasks: &[Task], csf: &BTreeMap<String, TaskInfo>, figures: &[Figu
     let mut h = String::new();
     h.push_str("<section id=\"sec-csf\">\n<h2>CSF architecture</h2>\n");
     h.push_str("<p class=\"q\">Which parts of the declared CSF architecture do the tasks exercise, and do the reference fixes pass CSF's own gates?</p>\n");
-    let _ = write!(h, "<p class=\"how\"><b>How to read this:</b> the repository declares its architecture in CSF \
+    let _ = writeln!(h, "<p class=\"how\"><b>How to read this:</b> the repository declares its architecture in CSF \
         (model <code>{}</code>{}). Each task's fix is mapped to the declared component whose source path is the \
-        longest prefix of each changed file; CSF's compiler <code>csfc</code> then checks the fix's own commit tree.</p>\n",
+        longest prefix of each changed file; CSF's compiler <code>csfc</code> then checks the fix's own commit tree.</p>",
         esc(&model.0), if model.1.is_empty() { String::new() } else { format!(", read at <code>{}</code>", esc(&model.1)) });
 
     if !with.is_empty() {
@@ -200,14 +212,21 @@ pub fn section(tasks: &[Task], csf: &BTreeMap<String, TaskInfo>, figures: &[Figu
             Some((name, c)) => format!("{} is touched most: {} task(s).", name, c.iter().sum::<usize>()),
             None => "No task's fix touches a declared component.".into(),
         };
-        let _ = write!(h, "<figure class=\"fig\" data-fig=\"csf-components\">{}{}</figure>\n",
+        let _ = writeln!(h, "<figure class=\"fig\" data-fig=\"csf-components\">{}{}</figure>",
             bar_chart(&rows, "Tasks (count)", "CSF component"),
-            caption("Figure", fig_n, "Declared CSF components the reference fixes touch, per set",
-                "One bar per declared component (plus tasks touching none), stacked by set; a task touching two components counts in both bars.",
-                "tasks (count)", &format!("{} of {total} tasks carry a CSF component map; {} of them touch at least one component", with.len(), mapped.len()),
-                "each changed non-test, non-generated Go file of the fix is assigned the component whose declared source is its longest path prefix (src/csf/map.rs)",
-                &format!("{} {} of {exam_ready} exam-ready tasks ({}) touch a declared component, so the rest of the exam exercises code the architecture model does not describe.",
-                         top_note, exam_mapped, pct(exam_mapped, exam_ready))));
+            caption(Cap {
+                kind: "Figure",
+                number: fig_n,
+                title: "Declared CSF components the reference fixes touch, per set",
+                what: "One bar per declared component (plus tasks touching none), stacked by set; a task touching two components counts in both bars.",
+                unit: "tasks (count)",
+                n: &format!("{} of {total} tasks carry a CSF component map; {} of them touch at least one component",
+                            with.len(), mapped.len()),
+                how: "each changed non-test, non-generated Go file of the fix is assigned the component whose declared source is its longest path prefix (src/csf/map.rs)",
+                takeaway: &format!("{top_note} {exam_mapped} of {exam_ready} exam-ready tasks ({}) touch a declared component, \
+                                    so the rest of the exam exercises code the architecture model does not describe.",
+                                   pct(exam_mapped, exam_ready)),
+            }));
     }
 
     if !guarded.is_empty() {
@@ -239,18 +258,28 @@ pub fn section(tasks: &[Task], csf: &BTreeMap<String, TaskInfo>, figures: &[Figu
             .is_some_and(|g| g.iter().any(|v| v.status != "skipped"))).count();
         let skip_reason = guarded.iter().filter_map(|t| info(csf, t).and_then(|i| i.guards.as_ref()))
             .flatten().find(|v| v.status == "skipped").map(|v| v.reason.clone()).unwrap_or_default();
-        let _ = write!(h, "<figure class=\"tbl\" data-fig=\"csf-guards\">{}{table}</figure>\n",
-            caption("Table", tab_n, "CSF gate outcomes on the reference fixes",
-                "Per gate, how many tasks' commit trees passed, failed, could not be judged (error) or were not checked (skipped), and on how many the gate is required of an agent.",
-                "tasks (count)", &format!("{n_guarded} of {total} tasks have guard records"),
-                "csfc check and csfc check-generated run read-only on each task's commit tree during mining (src/csf/guard.rs); a gate is required of the agent only where the reference fix passed it",
-                &if skipped_all { "Every gate was skipped (no csfc or no grammar when mining), so no task is guarded yet.".to_string() }
-                 else {
-                     let unchecked = if checked < n_guarded {
-                         format!(" The other {} task(s) were not checked (for example: {skip_reason}).", n_guarded - checked)
-                     } else { String::new() };
-                     format!("{fails} of {checked} checked reference fixes ({}) fail at least one gate; those gates are not required of an agent on those tasks.{unchecked}", pct(fails, checked))
-                 }));
+        let takeaway = if skipped_all {
+            "Every gate was skipped (no csfc or no grammar when mining), so no task is guarded yet.".to_string()
+        } else {
+            let unchecked = if checked < n_guarded {
+                format!(" The other {} task(s) were not checked (for example: {skip_reason}).", n_guarded - checked)
+            } else {
+                String::new()
+            };
+            format!("{fails} of {checked} checked reference fixes ({}) fail at least one gate; \
+                     those gates are not required of an agent on those tasks.{unchecked}", pct(fails, checked))
+        };
+        let _ = writeln!(h, "<figure class=\"tbl\" data-fig=\"csf-guards\">{}{table}</figure>",
+            caption(Cap {
+                kind: "Table",
+                number: tab_n,
+                title: "CSF gate outcomes on the reference fixes",
+                what: "Per gate, how many tasks' commit trees passed, failed, could not be judged (error) or were not checked (skipped), and on how many the gate is required of an agent.",
+                unit: "tasks (count)",
+                n: &format!("{n_guarded} of {total} tasks have guard records"),
+                how: "csfc check and csfc check-generated run read-only on each task's commit tree during mining (src/csf/guard.rs); a gate is required of the agent only where the reference fix passed it",
+                takeaway: &takeaway,
+            }));
         if !failing.is_empty() {
             let mut t = String::from("<div class=\"tablewrap\"><table><thead><tr><th>Task</th><th>Set</th><th>Subject</th>\
                 <th>Gate</th><th>First diagnostic</th></tr></thead><tbody>");
@@ -261,20 +290,25 @@ pub fn section(tasks: &[Task], csf: &BTreeMap<String, TaskInfo>, figures: &[Figu
                                esc(&task.sha12), esc(set_label(task.split)), esc(&task.subject), esc(&v.gate), esc(&d));
             }
             t.push_str("</tbody></table></div>");
-            let _ = write!(h, "<figure class=\"tbl\" data-fig=\"csf-failing\">{}{t}</figure>\n",
-                caption("Table", tab_n + 1, "Tasks whose reference fix fails a CSF gate",
-                    "One row per failing gate of a task, with csfc's first diagnostic.",
-                    "tasks and gates", &format!("{} failing gate result(s) on {fails} task(s)", failing.len()),
-                    "csfc's diagnostics as printed (file:line:col: code: message)",
-                    &failing_takeaway(&failing)));
+            let _ = writeln!(h, "<figure class=\"tbl\" data-fig=\"csf-failing\">{}{t}</figure>",
+                caption(Cap {
+                    kind: "Table",
+                    number: tab_n + 1,
+                    title: "Tasks whose reference fix fails a CSF gate",
+                    what: "One row per failing gate of a task, with csfc's first diagnostic.",
+                    unit: "tasks and gates",
+                    n: &format!("{} failing gate result(s) on {fails} task(s)", failing.len()),
+                    how: "csfc's diagnostics as printed (file:line:col: code: message)",
+                    takeaway: &failing_takeaway(&failing),
+                }));
         }
     }
 
-    let _ = write!(h, "<div class=\"card\"><dl>\
+    let _ = writeln!(h, "<div class=\"card\"><dl>\
         <dt>What it means</dt><dd>{} of {exam_ready} exam-ready tasks ({}) change code that the CSF architecture model declares; for those, the report can name the component (service, manager, library, adapter, gateway or resource) instead of a folder.</dd>\
         <dt>Why it matters</dt><dd>An exam that never touches declared components cannot show whether an agent respects the architecture; a gate the reference fix fails would punish an agent for the task author's choice.</dd>\
         <dt>What to do</dt><dd>Declare more of the repository's components in its architecture.csf (or mine a repository whose model covers more of its code) to raise coverage; mine with <code>--csfc</code> so every task records its gate verdicts; pass the gates marked required to the grader (<code>rrsi_mine.csf_guard</code>).</dd>\
-        </dl></div>\n</section>\n", exam_mapped, pct(exam_mapped, exam_ready));
+        </dl></div>\n</section>", exam_mapped, pct(exam_mapped, exam_ready));
     Some(h)
 }
 
