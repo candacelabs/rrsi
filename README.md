@@ -1,5 +1,106 @@
 # RRSI: Regularized Recursive Self-Improvement of Agent Harnesses
 
+> ## Candace Labs fork — prototype status
+>
+> **Before:** to learn whether a change to an AI coding agent actually helps
+> *on your own codebase*, you either trusted public benchmarks built from other
+> people's code, or wrote test tasks by hand and checked each one yourself.
+>
+> **Now:** one command turns your repository's git history into a verified
+> exam — 86 recent commits in about 11 minutes on one machine, 70 of them proven
+> questions (the tests fail before the real fix and pass after it, offline),
+> 25 of which pass every fairness check — and it warns you when the final exam
+> is not a fair test.
+>
+> **Things you can now try that were not possible before:**
+>
+> - **Hand an agent a real past bug from your own repo, as a proven-fair
+>   question.** Each of the 70 tasks gives the repo at the commit before the
+>   fix and hidden tests that are known to fail without it and pass with it;
+>   the fairness stages add a written instruction that never shows the fix
+>   (written for 66 of 70; 4 failed the leak check).
+> - **Measure how well your work is specified.** For each change, the fairness
+>   stages ask whether what was written down (commit message + tests) lets
+>   someone else rebuild it without guessing. Of 70 recent changes with valid
+>   tests: 25 (36%) were fully specified; 39 (56%) left a reader guessing
+>   behaviour or names (e.g. a "bounded grace" with no duration); 18 (26%) had
+>   tests pinning details no written spec states. Today this scores the recorded
+>   intent, a proxy for prompt quality; pointing it at the original prompts
+>   scores them directly (not wired yet).
+> - **Find tests that do not guard the change they shipped with.** 14 of 86
+>   commits added or changed tests that already passed *before* the change.
+>   For a pure refactor that is expected; for a bug fix it means the new test
+>   would not catch the bug coming back. The miner lists them.
+> - **See which parts of your codebase an exam covers**, per subsystem, per
+>   code layout and per fix size, before trusting any score on it.
+> - **Know in advance whether a final-exam result would mean anything.** The
+>   split-health checks flag a final exam that is harder, narrower or from a
+>   different part of the code than practice — here, 4 of 6 checks warned on
+>   the first split and 2 of 6 after the fairness stages.
+> - **Grow the exam automatically.** Re-running the miner only processes new
+>   commits, so every merged fix with a test becomes a new candidate question.
+> - **Do it on any Go repository** (`--repo PATH`), with no API key: the
+>   search roles and the agent can run on a logged-in Copilot or Codex CLI, or
+>   a local model.
+> - *One step away (grader and harness not wired yet):* compare two agent
+>   setups — two models, two prompts, two tool sets — by pass rate on your own
+>   code instead of on public benchmarks, and let RRSI evolve the harness
+>   against the practice set while the final exam checks for memorizing.
+>
+> Not shown yet: whether RRSI then improves an agent on that exam. That needs
+> the baseline and RRSI rounds, and will replace this headline.
+>
+> | What we measured | Result |
+> |---|---|
+> | Recent commits in our Go monorepo that change code + its tests | 86 candidates |
+> | ...that make a valid question (tests **fail** before the real fix, **pass** after, offline, pinned Go) | **70 of 86**; 14 dropped because the tests already passed before the fix, 2 because the commit itself did not build |
+> | Automatic check "is the final exam comparable to the practice set?" on the naive split (newest 10 held out) | **4 of 6 checks warn**: final-exam fixes 1.6x larger, 100% in one code layout vs 23%, half one subsystem, all from ~2 hours of work. A score on that split would not distinguish learning from memorizing. |
+> | Fairness stages on all 70 valid tasks (flaky tests, required API, instruction writing + leak check, independent solvability probe, over-specific tests) | **25 of 70 exam-ready**. Excluded: 25 by the probe alone (instruction ambiguous or names must be guessed), 10 by probe + over-specific tests, 6 by over-specific tests alone, 4 by the leak check. 0 flaky. |
+> | Exam after fairness (newest 10 exam-ready held out) | 15 practice + 10 final exam; split health 2 of 6 warn (final exam 0% vs practice 87% in the older `go/` layout). **15 practice tasks is too few for RRSI rounds** — next: mine further back and re-check the probe's strictness. |
+> | Toy domain end to end on a local 4B model (vLLM) | smoke 2/2 passed; loop, critic, sandbox and grader all run |
+> | Bugs the pipeline's own checks found and now pin with regression tests | download failures misread as failing tests; a new in-repo package misread as a download failure |
+>
+> **What this fork adds** (upstream RRSI below is unchanged):
+>
+> | Piece | What it does | Where |
+> |---|---|---|
+> | LLM backends | Run the search roles without Vertex: Anthropic API, any OpenAI-compatible server (vLLM), or a logged-in **Copilot** / **Codex** CLI | [`rrsi/llm.py`](rrsi/llm.py), [`rrsi/cli_llm.py`](rrsi/cli_llm.py) |
+> | `toy` domain | 30 small Python tasks with hidden tests, a deliberately weak harness, a network-less container sandbox — the cheapest full RRSI loop | [`domains/toy/`](domains/toy/README.md) |
+> | `rrsi-mine` | Rust: mine commits → validate FAIL_TO_PASS in sealed `golang` containers → fairness stages → `exam.jsonl`; pyo3 bindings (`import rrsi_mine`) for the Python side | [`tools/rrsi-mine/`](tools/rrsi-mine) |
+> | `rrsi-report` | Rust: one self-contained HTML report — plain-language "start here", funnel, why tasks were dropped, timeline, practice-set vs final-exam split with health checks and interpretation, task browser with example cards (the reference fix stays a collapsed spoiler) | [`tools/rrsi-mine/src/bin/rrsi-report.rs`](tools/rrsi-mine/src/bin/rrsi-report.rs) |
+>
+> **How it works, in one example.** A commit "suppress unsafe notification
+> retries" added a test: *a delivery error that says it is not retryable must be
+> attempted once*. On the commit before, that test fails; with the real 24-line
+> fix it passes — so it is a fair question. The agent gets a written
+> description of the required behaviour and API (never the fix), and is graded
+> by those hidden tests. RRSI then rewrites the agent's *harness* (prompts,
+> tools, loop — not the model) and keeps only changes that beat measured noise;
+> the newest tasks are held back as a final exam the process never sees.
+>
+> **Counterfactuals — why each check exists:** keep a task whose tests already
+> passed → an agent that does nothing "passes"; count a download failure as a
+> failing test → questions look valid for the wrong reason (this happened, and
+> is now a pinned regression test); let instructions quote the fix → the agent
+> copies it; hide a required function name → nobody can pass without guessing;
+> make the final exam harder or narrower than practice → a lower score looks
+> like overfitting when it is really a harder exam.
+>
+> **Run it** (mined tasks contain private source: `--out` must be outside every
+> git work tree, which the tool enforces):
+>
+> ```bash
+> cargo build --release --manifest-path tools/rrsi-mine/Cargo.toml
+> tools/rrsi-mine/target/release/rrsi-mine mine --repo PATH --out DIR --jobs 8
+> tools/rrsi-mine/target/release/rrsi-mine fairness --tasks DIR --jobs 4
+> tools/rrsi-mine/target/release/rrsi-report --tasks DIR --repo PATH --out DIR/report.html --splits-out DIR/splits.json
+> ```
+>
+> **Next:** fairness on all 70 tasks, a balanced split (newest ~2 weeks,
+> spread across subsystems), then the `house_go` domain: baseline → noise band
+> → RRSI rounds → final exam. The headline above will be replaced by that
+> result.
+
 Check out our [paper](https://arxiv.org/abs/2609.24972) and [project page](https://regularized-rsi.com/) for more details.
 
 ## 🔥 Updates

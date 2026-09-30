@@ -1,0 +1,31 @@
+[package]
+name = "rrsi-mine"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+description = "Mine SWE-style Go tasks (FAIL_TO_PASS validated) from a repository's git history"
+publish = false
+
+[lib]
+name = "rrsi_mine"
+# rlib for the CLI binary, cdylib for the Python extension (feature `python`).
+crate-type = ["rlib", "cdylib"]
+
+[[bin]]
+name = "rrsi-mine"
+path = "src/main.rs"
+
+[features]
+python = ["dep:pyo3"]
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+pyo3 = { version = "0.25", features = ["extension-module", "abi3-py310"], optional = true }
+
+[profile.release]
+lto = "thin"
