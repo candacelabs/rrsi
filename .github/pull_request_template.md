@@ -4,8 +4,8 @@
 
 ## Changes
 
-<!-- One row per change. Before and After describe behaviour, so that together
-they explain the Why. -->
+<!-- One row per change. Before and After are concrete examples (a command,
+input, output or error), never prose; Why is a few words. -->
 
 | Area | Before | After | Why |
 |---|---|---|---|
