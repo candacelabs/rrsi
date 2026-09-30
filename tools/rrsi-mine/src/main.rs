@@ -161,6 +161,10 @@ enum CsfCmd {
         tasks: PathBuf,
         #[arg(long)]
         repo: PathBuf,
+        /// Also run CSF's gates on each task's commit tree into `csf_guards`
+        /// (exports every commit; the same guards `mine` records).
+        #[arg(long)]
+        guards: bool,
         #[command(flatten)]
         csf: CsfArgs,
     },
@@ -245,8 +249,9 @@ fn print_detection(d: &csf::detect::Detection) {
     }
 }
 
-/// Write `csf` into each task.json under `tasks`, keeping every other field.
-fn annotate(tasks: &Path, csf: &MineCsf) -> Result<()> {
+/// Write `csf` (and with `guards`, `csf_guards`) into each task.json under
+/// `tasks`, keeping every other field.
+fn annotate(tasks: &Path, repo: &Path, csf: &MineCsf, guards: bool) -> Result<()> {
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(tasks)?.flatten().map(|e| e.path())
         .filter(|p| p.join("task.json").is_file()).collect();
     dirs.sort();
@@ -263,6 +268,15 @@ fn annotate(tasks: &Path, csf: &MineCsf) -> Result<()> {
         match t {
             Some(t) => v["csf"] = serde_json::to_value(t)?,
             None => { v.as_object_mut().map(|o| o.remove("csf")); }
+        }
+        if guards {
+            if let Some(sha) = v.get("sha").and_then(|s| s.as_str()).map(str::to_string) {
+                let tree = csf::materialize(repo, &sha)?;
+                match csf.guards(tree.path())? {
+                    Some(g) => v["csf_guards"] = serde_json::to_value(g)?,
+                    None => { v.as_object_mut().map(|o| o.remove("csf_guards")); }
+                }
+            }
         }
         std::fs::write(&path, serde_json::to_string_pretty(&v)?)?;
     }
@@ -384,11 +398,11 @@ fn main() -> Result<()> {
                 let v = csf::guard::guard(&tree, gate.csfc.as_deref(), gate.csf_grammar.as_deref(), &gate.csf_source)?;
                 println!("{}", serde_json::to_string_pretty(&v)?);
             }
-            CsfCmd::Annotate { tasks, repo, csf } => {
+            CsfCmd::Annotate { tasks, repo, guards, csf } => {
                 let repo = canonical(&repo)?;
                 let csf = csf.resolve(&repo)?;
                 println!("[csf] {}", csf.describe());
-                annotate(&tasks, &csf)?;
+                annotate(&tasks, &repo, &csf, guards)?;
             }
         },
         Cmd::Flake { stage, repo, runs, go } => {
