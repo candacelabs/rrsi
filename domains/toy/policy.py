@@ -18,6 +18,9 @@ RRSI_POLICY_BACKEND selects the transport:
   openai     an OpenAI-compatible /chat/completions server at
              RRSI_POLICY_BASE_URL (default RRSI_OPENAI_BASE_URL)
   anthropic  the Anthropic Messages API with ANTHROPIC_API_KEY
+  copilot    a logged-in Copilot CLI or Codex CLI (rrsi/cli_llm.py): the
+  codex      conversation is flattened into one prompt per call and tokens
+             are estimated at characters/4
 
 RRSI_POLICY_MODEL names the model. The harness receives `chat` as a plain
 callable; it cannot change the model, the backend or the sampling settings.
@@ -27,9 +30,14 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from rrsi import cli_llm  # noqa: E402
 
 BACKEND = os.environ.get("RRSI_POLICY_BACKEND", "openai").strip().lower()
 MODEL = os.environ.get("RRSI_POLICY_MODEL", "")
@@ -64,6 +72,17 @@ def chat(messages: list[dict], json_mode: bool = False) -> tuple[str, int]:
     -> (reply text, total tokens of this call)."""
     if not MODEL:
         raise PolicyError("set RRSI_POLICY_MODEL")
+    if BACKEND in cli_llm.CLIS:
+        system = "\n\n".join(m["content"] for m in messages if m["role"] == "system")
+        convo = "\n\n".join(f"[{m['role'].upper()}]\n{m['content']}"
+                             for m in messages if m["role"] != "system")
+        prompt = (convo + "\n\n[ASSISTANT]\nWrite only your next reply as the "
+                  "assistant, nothing else.")
+        try:
+            text = cli_llm.complete(BACKEND, MODEL, system, prompt)
+        except cli_llm.CLIError as e:
+            raise PolicyError(str(e)) from e
+        return text, cli_llm.estimate_tokens(system, prompt, text)
     if BACKEND == "anthropic":
         system = "\n\n".join(m["content"] for m in messages if m["role"] == "system")
         body = {"model": MODEL, "max_tokens": MAX_TOKENS, "temperature": TEMPERATURE,

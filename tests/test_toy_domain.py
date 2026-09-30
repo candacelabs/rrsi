@@ -165,3 +165,24 @@ def test_openai_backend_against_fake_server(monkeypatch):
         assert seen["body"]["messages"][1]["content"].startswith("stable")
     finally:
         srv.shutdown()
+
+
+def test_cli_backend_uses_stdin_and_reads_reply(monkeypatch, tmp_path):
+    import subprocess
+    from rrsi import cli_llm
+    seen = {}
+
+    def fake_run(cmd, input, cwd, capture_output, text, timeout):
+        seen["cmd"], seen["input"] = cmd, input
+        if cmd[0] == "codex":
+            Path(cmd[cmd.index("-o") + 1]).write_text("codex reply\n")
+            return subprocess.CompletedProcess(cmd, 0, "tokens used\n9\n", "")
+        return subprocess.CompletedProcess(cmd, 0, "copilot reply\n", "")
+
+    monkeypatch.setattr(cli_llm.subprocess, "run", fake_run)
+    big = "x" * 300_000
+    assert cli_llm.complete("copilot", "m", "SYS", big) == "copilot reply"
+    assert seen["input"].startswith("SYS") and seen["input"].endswith(big)
+    assert "--available-tools" in seen["cmd"] and big not in seen["cmd"]
+    assert cli_llm.complete("codex", "m", None, "hi") == "codex reply"
+    assert seen["cmd"][-1] == "-"

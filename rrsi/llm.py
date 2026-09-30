@@ -26,7 +26,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Modified 2026 by Candace Labs: added the anthropic and openai backends.
+# Modified 2026 by Candace Labs: added the anthropic, openai and CLI backends.
 """LLM client for the three search roles (proposer, analyst, critic).
 
 `RRSI_LLM_BACKEND` selects the transport:
@@ -38,6 +38,8 @@
   openai     Any OpenAI-compatible /chat/completions server (vLLM, SGLang,
              llama.cpp, ...) at RRSI_OPENAI_BASE_URL. Every role uses
              RRSI_OPENAI_MODEL; the Claude model names in rrsi.json are ignored.
+  copilot    A logged-in GitHub Copilot CLI or Codex CLI (rrsi/cli_llm.py);
+  codex      every role uses RRSI_CLI_MODEL. No API key.
 
 `RRSI_SEARCH_MODEL_OVERRIDE`, when set, replaces the model of every role on
 the vertex and anthropic backends.
@@ -58,6 +60,8 @@ import threading
 import time
 import urllib.error
 import urllib.request
+
+from . import cli_llm
 
 MODEL = os.environ.get("RRSI_SEARCH_MODEL", "claude-opus-4-8")
 BACKEND = os.environ.get("RRSI_LLM_BACKEND", "vertex").strip().lower()
@@ -178,7 +182,11 @@ def generate(prompt: str, system: str | None = None, max_retries: int = 6,
     for attempt in range(max_retries):
         idx = (start + attempt) % n
         try:
-            if BACKEND == "openai":
+            if BACKEND in cli_llm.CLIS:
+                user = (cache_prefix + "\n\n" + prompt) if cache_prefix else prompt
+                text = cli_llm.complete(BACKEND, os.environ.get("RRSI_CLI_MODEL", ""),
+                                        sys_prompt, user)
+            elif BACKEND == "openai":
                 user = (cache_prefix + "\n\n" + prompt) if cache_prefix else prompt
                 text = _openai_chat(sys_prompt, user, json_only, max_tokens)
             else:
