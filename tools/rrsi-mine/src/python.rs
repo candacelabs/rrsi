@@ -24,6 +24,10 @@
 //! rrsi_mine.decide(parent_outcome, commit_outcome) -> (valid, reason)
 //! rrsi_mine.load_exam(tasks_dir) -> list[dict]   (exam-ready tasks: sha, sha12,
 //!                   parent, module_root, packages, instruction)
+//! rrsi_mine.csf_guard(tree, csfc=None, grammar=None, sources=None) -> list[dict]
+//!                   (CSF's gates on a checkout, e.g. one with an agent's patch
+//!                   applied: gate, model, status pass|fail|error|skipped,
+//!                   reason, summary, diagnostics [{file, line, col, code, message}])
 //! ```
 
 use pyo3::exceptions::PyRuntimeError;
@@ -91,6 +95,22 @@ fn load_exam(py: Python<'_>, tasks_dir: &str) -> PyResult<PyObject> {
     Ok(loads.call1((json,))?.unbind())
 }
 
+/// CSF's gates (`csfc check`, `csfc check-generated`) on the checkout
+/// `tree`, exactly as `rrsi-mine csf guard` runs them. A grader applies the
+/// guards a task marks `required_of_agent` to the agent's patched tree.
+#[pyfunction]
+#[pyo3(signature = (tree, csfc = None, grammar = None, sources = None))]
+fn csf_guard(py: Python<'_>, tree: &str, csfc: Option<&str>, grammar: Option<&str>,
+             sources: Option<Vec<String>>) -> PyResult<PyObject> {
+    let sources = sources.unwrap_or_default();
+    let verdicts = py.allow_threads(|| crate::csf::guard::guard(Path::new(tree), csfc.map(Path::new),
+                                                                 grammar.map(Path::new), &sources))
+        .map_err(err)?;
+    let json = serde_json::to_string(&verdicts).map_err(|e| err(e.into()))?;
+    let loads = PyModule::import(py, "json")?.getattr("loads")?;
+    Ok(loads.call1((json,))?.unbind())
+}
+
 #[pymodule]
 fn rrsi_mine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(list_candidates, m)?)?;
@@ -99,5 +119,6 @@ fn rrsi_mine(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(go_test, m)?)?;
     m.add_function(wrap_pyfunction!(decide, m)?)?;
     m.add_function(wrap_pyfunction!(load_exam, m)?)?;
+    m.add_function(wrap_pyfunction!(csf_guard, m)?)?;
     Ok(())
 }
