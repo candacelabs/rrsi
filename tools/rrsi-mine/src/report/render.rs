@@ -15,6 +15,8 @@
 //! Fill report/report.html with the tasks, the split and the summary as one
 //! embedded JSON document.
 
+use super::explain::Start;
+use super::figures::{lint, Page};
 use super::health::Health;
 use super::load::Task;
 use super::split::{examples, rule_sentence, summarize, Splits};
@@ -45,10 +47,26 @@ pub fn embed_json(v: &serde_json::Value) -> String {
     out
 }
 
+/// Everything the page shows.
+pub struct Inputs<'a> {
+    pub tasks: &'a [Task],
+    pub splits: &'a Splits,
+    pub health: &'a Health,
+    pub start: &'a Start,
+    pub page: &'a Page,
+    pub heldout: usize,
+    pub exam_lines: Option<usize>,
+}
+
 /// The whole page.
-pub fn render(tasks: &[Task], splits: &Splits, health: &Health, heldout: usize,
-              exam_lines: Option<usize>, generated_at: &str) -> Result<String> {
+pub fn render(i: &Inputs, generated_at: &str) -> Result<String> {
+    let Inputs { tasks, splits, health, start, page, heldout, exam_lines } = *i;
+    let problems = lint(page);
+    ensure!(problems.is_empty(), "the report fails its figure lint:\n  {}", problems.join("\n  "));
     let data = json!({
+        "tiles": page.tiles,
+        "figures": page.figures,
+        "methods": page.methods,
         "generated_at": generated_at,
         "heldout_n": heldout,
         "rule": rule_sentence(heldout),
@@ -57,6 +75,7 @@ pub fn render(tasks: &[Task], splits: &Splits, health: &Health, heldout: usize,
         "summary": summarize(tasks),
         "splits": splits,
         "health": health,
+        "start": start,
         "examples": examples(tasks),
         "tasks": tasks,
     });

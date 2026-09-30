@@ -15,7 +15,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 Template of rrsi-report (src/bin/rrsi-report.rs). The binary replaces the
-data slot below with one JSON document; everything else is static.
+data slot below with one JSON document; every number, caption and chart
+spec comes from it (report/figures.rs). The prose here is generic.
 -->
 <html lang="en">
 <head>
@@ -27,6 +28,7 @@ data slot below with one JSON document; everything else is static.
   color-scheme: light;
   --bg: #fcfcfb; --panel: #ffffff; --border: #e3e2de; --ink: #0b0b0b; --ink-2: #52514e; --ink-3: #7a7974;
   --evolve: #2a78d6; --heldout: #eb6834; --excluded: #a3a29d; --mine: #1baf7a; --fair: #4a3aa7;
+  --cat1: #1baf7a; --cat2: #4a3aa7; --cat3: #eda100; --cat4: #e87ba4; --cat5: #008300; --cat6: #e34948;
   --pass: #008300; --fail: #c62f2e; --code-bg: #f4f3f0; --chip-bg: #efeeea; --warn-bg: #fff4d6;
 }
 @media (prefers-color-scheme: dark) {
@@ -34,6 +36,7 @@ data slot below with one JSON document; everything else is static.
     color-scheme: dark;
     --bg: #1a1a19; --panel: #222221; --border: #3a3a37; --ink: #ffffff; --ink-2: #c3c2b7; --ink-3: #97968e;
     --evolve: #3987e5; --heldout: #d95926; --excluded: #6e6d68; --mine: #199e70; --fair: #9085e9;
+    --cat1: #199e70; --cat2: #9085e9; --cat3: #c98500; --cat4: #d55181; --cat5: #008300; --cat6: #e66767;
     --pass: #4cbb4c; --fail: #e66767; --code-bg: #2b2b29; --chip-bg: #2e2e2c; --warn-bg: #3d3420;
   }
 }
@@ -41,133 +44,276 @@ data slot below with one JSON document; everything else is static.
   color-scheme: dark;
   --bg: #1a1a19; --panel: #222221; --border: #3a3a37; --ink: #ffffff; --ink-2: #c3c2b7; --ink-3: #97968e;
   --evolve: #3987e5; --heldout: #d95926; --excluded: #6e6d68; --mine: #199e70; --fair: #9085e9;
+  --cat1: #199e70; --cat2: #9085e9; --cat3: #c98500; --cat4: #d55181; --cat5: #008300; --cat6: #e66767;
   --pass: #4cbb4c; --fail: #e66767; --code-bg: #2b2b29; --chip-bg: #2e2e2c; --warn-bg: #3d3420;
 }
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--ink);
-  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
 main { max-width: 1200px; margin: 0 auto; padding: 24px 16px 64px; }
 h1 { font-size: 1.6rem; margin: 0 0 4px; }
-h2 { font-size: 1.15rem; margin: 0 0 4px; }
+h2 { font-size: 1.2rem; margin: 0 0 6px; }
 h3 { font-size: 1rem; margin: 0 0 6px; }
-p.lede, .muted { color: var(--ink-2); }
-section { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
-  padding: 16px; margin: 16px 0; min-width: 0; }
-.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 460px), 1fr)); gap: 16px; }
-.grid2 > section { margin: 0; }
-.stats { display: flex; flex-wrap: wrap; gap: 8px 24px; margin: 12px 0 0; }
-.stat b { display: block; font-size: 1.5rem; font-variant-numeric: tabular-nums; }
-.stat span { color: var(--ink-2); font-size: .85rem; }
-.chart { width: 100%; min-height: 60px; overflow-x: auto; }
+.muted { color: var(--ink-2); } .small { font-size: .82rem; }
+section { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; margin: 16px 0; min-width: 0; }
 .banner { background: var(--warn-bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin: 12px 0; }
 .hidden { display: none !important; }
+code, pre, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .82rem; }
+pre { background: var(--code-bg); padding: 10px; border-radius: 6px; overflow: auto; max-height: 420px; white-space: pre; margin: 6px 0; }
+pre.wrap { white-space: pre-wrap; word-break: break-word; }
 .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: baseline; }
 .s-evolve { background: var(--evolve); } .s-heldout { background: var(--heldout); } .s-excluded { background: var(--excluded); }
-.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0 12px; }
-.controls input { flex: 1 1 240px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 6px;
-  background: var(--bg); color: var(--ink); font: inherit; }
-.chip { border: 1px solid var(--border); background: var(--chip-bg); color: var(--ink); border-radius: 999px;
-  padding: 4px 12px; font: inherit; font-size: .85rem; cursor: pointer; }
-.chip[aria-pressed="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
-.tablewrap { overflow-x: auto; }
 table { border-collapse: collapse; width: 100%; font-size: .88rem; }
 th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
-th { color: var(--ink-2); font-weight: 600; position: sticky; top: 0; background: var(--panel); }
-tbody tr.row { cursor: pointer; }
-tbody tr.row:hover, tbody tr.row.open { background: var(--chip-bg); }
-td.nw { white-space: nowrap; }
-td.num { text-align: right; font-variant-numeric: tabular-nums; }
-code, pre, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .82rem; }
-pre { background: var(--code-bg); padding: 10px; border-radius: 6px; overflow: auto; max-height: 420px;
-  white-space: pre; margin: 6px 0; }
-pre.wrap { white-space: pre-wrap; word-break: break-word; }
+th { color: var(--ink-2); font-weight: 600; background: var(--panel); }
+.tablewrap { overflow-x: auto; }
+td.num { text-align: right; font-variant-numeric: tabular-nums; } td.nw { white-space: nowrap; }
+/* headline */
+.headline { border: 2px solid var(--ink); }
+.kicker { font-size: .78rem; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-2); }
+.bn { font-size: 1.12rem; line-height: 1.5; margin: 8px 0; max-width: 88ch; }
+.bn b { font-size: 1rem; text-transform: uppercase; letter-spacing: .04em; margin-right: 6px; }
+.bn.now { font-weight: 600; }
+.tries { margin: 6px 0 10px; padding-left: 20px; } .tries li { margin: 4px 0; }
+.tries li.future { color: var(--ink-2); list-style-type: circle; }
+.tries li.future .tag { font-size: .75rem; font-weight: 700; border: 1px solid currentColor; border-radius: 999px; padding: 0 6px; margin-right: 4px; }
+.hl-not { padding: 8px 10px; border-radius: 6px; background: var(--chip-bg); color: var(--ink-2); margin: 8px 0; }
+.keynums { margin: 4px 0 0; padding-left: 20px; font-size: .9rem; color: var(--ink-2); }
+/* start here */
+.start { border-width: 2px; }
+.start p.big { font-size: 1.05rem; max-width: 72ch; }
+.start h3.sub { margin-top: 22px; font-size: 1.05rem; }
+.analogies { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); gap: 12px; margin: 12px 0; }
+.analogy { background: var(--chip-bg); border-radius: 8px; padding: 10px 12px; }
+.worked { display: grid; gap: 8px; }
+.step { display: grid; grid-template-columns: 2rem minmax(0, 1fr); gap: 10px; align-items: start; }
+.step .n { width: 2rem; height: 2rem; border-radius: 50%; background: var(--ink); color: var(--bg); display: grid; place-items: center; font-weight: 700; }
+.step .t { font-weight: 600; }
+.step.good .n { background: var(--pass); } .step.bad .n { background: var(--fail); }
+table.why td:first-child { font-weight: 600; }
+table.outcomes td:first-child, table.outcomes td:nth-child(2) { white-space: nowrap; font-weight: 600; }
+.pipeline { list-style: none; padding: 0; margin: 8px 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; counter-reset: p; }
+.pipeline li { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; counter-increment: p; }
+.pipeline li::before { content: counter(p) ". "; font-weight: 700; }
+.pipeline li.done { border-color: var(--pass); }
+.pipeline li.partial, .pipeline li.next { border: 2px solid var(--heldout); background: var(--warn-bg); }
+.pipeline .st { display: block; font-size: .8rem; font-weight: 700; color: var(--ink-2); text-transform: uppercase; letter-spacing: .03em; }
+.pipeline li.done .st { color: var(--pass); } .pipeline li.partial .st, .pipeline li.next .st { color: var(--heldout); }
+.pipeline .d { display: block; font-size: .82rem; color: var(--ink-2); }
+.glossary { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; }
+.glossary dt { font-weight: 700; } .glossary dd { margin: 0; color: var(--ink-2); }
+@media (max-width: 600px) { .glossary { grid-template-columns: 1fr; } .glossary dd { margin-bottom: 6px; } }
+/* numbers */
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr)); gap: 10px; margin: 12px 0; }
+.tile { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+.tile .v { font-size: 1.6rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+.tile .u { font-size: .9rem; color: var(--ink-2); margin-left: 4px; }
+.tile .l { font-weight: 600; } .tile .d { font-size: .8rem; color: var(--ink-2); }
+details.methods { margin-top: 8px; } details.methods summary { font-weight: 700; color: var(--ink); cursor: pointer; }
+details.methods dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; font-size: .88rem; }
+details.methods dt { font-weight: 700; } details.methods dd { margin: 0; color: var(--ink-2); }
+@media (max-width: 700px) { details.methods dl { grid-template-columns: 1fr; } }
+/* figures */
+figure { margin: 8px 0 0; min-width: 0; }
+figcaption { font-size: .88rem; color: var(--ink-2); margin: 8px 0; max-width: 100ch; }
+figcaption .fn { color: var(--ink); font-weight: 700; } figcaption .ft { color: var(--ink); font-weight: 600; }
+figcaption .tk { display: block; margin-top: 4px; color: var(--ink); border-left: 3px solid var(--ink-3); padding-left: 8px; }
+.chart { width: 100%; min-height: 60px; overflow-x: auto; }
+p.q { font-size: 1rem; margin: 4px 0; }
+p.how { color: var(--ink-2); font-size: .9rem; margin: 4px 0 8px; }
+.health-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 460px), 1fr)); gap: 16px 24px; margin-top: 14px; }
+.health-charts h3 { font-size: .95rem; }
+table.health-table td { min-width: 140px; font-size: .86rem; }
+table.health-table td.hc-name { font-weight: 600; min-width: 170px; }
+table.health-table tr.warn td.hc-name { color: var(--fail); }
+.status { font-weight: 700; font-size: .8rem; padding: 1px 8px; border-radius: 999px; border: 1px solid currentColor; white-space: nowrap; }
+.status.pass { color: var(--pass); } .status.warn { color: var(--fail); } .status.na { color: var(--ink-3); }
+.verdict-p { padding: 10px 12px; border-radius: 8px; margin: 12px 0 6px; font-size: .98rem; }
+.verdict-p.warn { background: var(--warn-bg); } .verdict-p.pass { background: var(--chip-bg); }
+/* cards and browser */
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0 12px; }
+.controls input { flex: 1 1 240px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--ink); font: inherit; }
+.chip { border: 1px solid var(--border); background: var(--chip-bg); color: var(--ink); border-radius: 999px; padding: 4px 12px; font: inherit; font-size: .85rem; cursor: pointer; }
+.chip[aria-pressed="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+tbody tr.row { cursor: pointer; } tbody tr.row:hover, tbody tr.row.open { background: var(--chip-bg); }
 .card { border: 1px solid var(--border); border-radius: 10px; padding: 14px; background: var(--bg); min-width: 0; }
 .card .meta { color: var(--ink-2); font-size: .85rem; margin-bottom: 8px; }
 .card dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 8px 0; font-size: .88rem; }
-.card dt { color: var(--ink-2); }
-.card dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
-details { margin: 6px 0; }
-summary { cursor: pointer; color: var(--ink-2); font-weight: 600; }
+.card dt { color: var(--ink-2); } .card dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+details { margin: 6px 0; } summary { cursor: pointer; color: var(--ink-2); font-weight: 600; }
 details.spoiler > summary { color: var(--fail); }
-.verdict { display: inline-block; font-size: .8rem; padding: 1px 8px; border-radius: 999px; margin: 2px 4px 2px 0;
-  border: 1px solid var(--border); }
+.verdict { display: inline-block; font-size: .8rem; padding: 1px 8px; border-radius: 999px; margin: 2px 4px 2px 0; border: 1px solid var(--border); }
 .verdict.pass { color: var(--pass); } .verdict.fail { color: var(--fail); } .verdict.none { color: var(--ink-3); }
 .examples { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr)); gap: 12px; }
 .split-tag { font-size: .8rem; font-weight: 600; white-space: nowrap; }
-.health { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 20px; margin-top: 8px; }
-@media (max-width: 900px) { .health { grid-template-columns: 1fr; } }
-.health-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 12px 20px; }
-.health-charts h3 { font-size: .9rem; color: var(--ink-2); font-weight: 600; }
-.status { font-weight: 700; font-size: .8rem; padding: 1px 8px; border-radius: 999px; border: 1px solid currentColor; white-space: nowrap; }
-.status.pass { color: var(--pass); } .status.warn { color: var(--fail); } .status.na { color: var(--ink-3); }
-.small { font-size: .8rem; }
+a.jump { color: var(--evolve); cursor: pointer; }
 footer { color: var(--ink-3); font-size: .8rem; margin-top: 24px; }
 </style>
 </head>
 <body>
 <main>
-<header>
-  <h1>RRSI task exam</h1>
-  <p class="lede" id="rule"></p>
-  <p class="muted" id="generated"></p>
-  <div class="stats" id="stats"></div>
-  <div class="banner hidden" id="vega-missing" role="alert">
-    Charts could not load: the pinned Vega scripts from cdn.jsdelivr.net did not load or failed their
-    integrity check (offline, blocked, or tampered). Every number is still in the task browser below.
-  </div>
-  <div class="banner hidden" id="fairness-missing">
-    Fairness not run yet: no task has a <code>fairness/gate.json</code>, so exam-ready means FAIL_TO_PASS valid.
-    Stage verdicts, instructions and the required API appear here once the fairness stages write them.
-  </div>
-  <noscript><div class="banner">This report draws its charts and task browser with JavaScript.</div></noscript>
-</header>
+<header><h1>RRSI task exam</h1><p class="muted small" id="generated"></p></header>
 
-<section><h2>Funnel</h2><p class="muted">From mined candidates to the two exam splits.</p><div class="chart" id="c-funnel"></div></section>
+<section id="headline" class="headline" aria-label="What this prototype has shown so far">
+  <div class="kicker">What this prototype has shown so far</div>
+  <p class="bn"><b>Before:</b><span id="hl-before"></span></p>
+  <p class="bn now"><b>Now:</b><span id="hl-now"></span></p>
+  <div class="kicker" style="margin-top:10px">Things you can now try that were not possible before</div>
+  <ul class="tries" id="hl-tries"></ul>
+  <p class="hl-not" id="hl-not"></p>
+  <div class="kicker">Key numbers</div>
+  <ul class="keynums" id="hl-bullets"></ul>
+</section>
+
+<div class="banner hidden" id="vega-missing" role="alert">
+  Charts could not load: the pinned Vega scripts from cdn.jsdelivr.net did not load or failed their
+  integrity check (offline, blocked, or tampered). Every number is still in the tables and captions.
+</div>
+<div class="banner hidden" id="fairness-missing">
+  Fairness not run yet: no task has a fairness verdict, so &ldquo;exam-ready&rdquo; currently means only
+  &ldquo;tests fail before the fix and pass after it&rdquo;. Instructions, required names and per-stage
+  verdicts appear here once the fairness stages write them.
+</div>
+<noscript><div class="banner">This report draws its charts, tables and captions with JavaScript.</div></noscript>
+
+<section id="start-here" class="start">
+  <h2>Start here</h2>
+  <p class="big">We turn past bug fixes from our own repository into an exam for an AI coding agent.
+  An automatic process called RRSI then rewrites the agent's <em>harness</em> &mdash; the instructions, tools and
+  step-by-step loop wrapped around the AI model, never the model itself &mdash; and keeps a change only when it raises
+  the exam score by more than luck would. The final exam uses newer tasks the process never saw, so we can tell a
+  real improvement from memorized answers.</p>
+  <div class="analogies">
+    <div class="analogy"><b>Like a driving test built from real incidents on your own roads.</b>
+      Every question is a situation that actually happened here, and we know a right answer exists because someone found it.</div>
+    <div class="analogy"><b>Like a teacher who drills students on last year's homework, then grades them on this year's.</b>
+      If they only memorized last year's answers, this year's test shows it.</div>
+  </div>
+  <p class="muted"><b>The same pipeline works elsewhere.</b> Another Go repository: only the repository path changes.
+  A Python repository: <code>pytest</code> replaces <code>go test</code>; the rule &ldquo;fails before the fix, passes after it&rdquo; stays.
+  A docs team: there are no tests, so a rubric grader (a checklist a reviewer or a model scores against) replaces them;
+  mining past changes, the fairness checks and the newest-as-final-exam split stay the same.</p>
+
+  <h3 class="sub">One real question, end to end</h3>
+  <div id="worked" class="worked"></div>
+  <details class="spoiler hidden" id="we-fix"><summary>SPOILER: the reference fix</summary><pre></pre></details>
+
+  <h3 class="sub">Why each filter exists &mdash; what would go wrong without it</h3>
+  <figure class="tbl" data-fig="why"><figcaption></figcaption>
+    <div class="tablewrap"><table class="why">
+      <thead><tr><th>Filter</th><th>Without it&hellip;</th><th>A real case from this data</th></tr></thead>
+      <tbody id="why-rows"></tbody>
+    </table></div>
+  </figure>
+
+  <h3 class="sub">How to read the result, later</h3>
+  <figure class="tbl" data-fig="outcomes"><figcaption></figcaption>
+    <div class="tablewrap"><table class="outcomes">
+      <thead><tr><th>Practice-set pass rate (% of tasks solved)</th><th>Final-exam pass rate (% of tasks solved)</th><th>What it would mean</th></tr></thead>
+      <tbody>
+        <tr><td>40% &rarr; 55%</td><td>38% &rarr; 52%</td><td><b>Real improvement.</b> The gain carries over to tasks it never saw.</td></tr>
+        <tr><td>40% &rarr; 60%</td><td>38% &rarr; 39%</td><td><b>Memorized the exam (overfitting).</b> Better at practice questions only.</td></tr>
+        <tr><td>40% &rarr; 41%</td><td>38% &rarr; 38%</td><td><b>The harness changes did not help.</b> Still a real, useful answer.</td></tr>
+        <tr><td>40% &rarr; 40%</td><td>38% &rarr; 45%</td><td><b>Probably luck.</b> Check the noise band before believing it.</td></tr>
+      </tbody>
+    </table></div>
+  </figure>
+
+  <h3 class="sub">Where we are</h3>
+  <ol class="pipeline" id="pipeline"></ol>
+
+  <h3 class="sub">Words used on this page</h3>
+  <dl class="glossary">
+    <dt>Task</dt><dd>One past commit turned into one exam question: the code before the fix, a written instruction, and the commit's own tests as the hidden grader.</dd>
+    <dt>Fix size</dt><dd>Lines changed in the commit's reference fix: added plus removed lines in non-test, non-generated Go files. A one-line rename is 2 lines.</dd>
+    <dt>Harness</dt><dd>Everything around the model: e.g. a system prompt saying &ldquo;run the tests before you submit&rdquo;, the tools it may call, how many tries it gets.</dd>
+    <dt>Practice set (evolve)</dt><dd>The tasks RRSI may look at while it improves the harness &mdash; here, the <span data-fill="evolve"></span> older exam-ready tasks.</dd>
+    <dt>Final exam (held-out)</dt><dd>Tasks kept aside until the end &mdash; here, the <span data-fill="heldout"></span> newest exam-ready tasks.</dd>
+    <dt>FAIL_TO_PASS</dt><dd>The validity rule: a task counts only if its tests fail before the fix and pass after it &mdash; like the worked example above.</dd>
+    <dt>BuildFail / TestFail</dt><dd>How the tests failed before the fix: they did not compile (e.g. they call a function that does not exist yet), or they compiled and a check failed.</dd>
+    <dt>Noise band</dt><dd>How far the score moves when nothing changes: if the same harness scores 52% and then 56% on reruns, a 3-point &ldquo;gain&rdquo; means nothing.</dd>
+    <dt>95% CI</dt><dd>A range that would contain the true value in 95 of 100 repeated samples; with 10 tasks, ranges are wide.</dd>
+  </dl>
+</section>
+
+<section id="numbers">
+  <h2>The exam in numbers</h2>
+  <p class="muted" id="rule"></p>
+  <div class="tiles" id="tiles"></div>
+  <details class="methods"><summary>Methods</summary><dl id="methods"></dl></details>
+</section>
+
+<section id="sec-funnel">
+  <h2>Where commits were lost</h2>
+  <p class="q">How many past commits became usable exam questions?</p>
+  <p class="how"><b>How to read this:</b> read top to bottom; each bar is what is left after one more check. The last two bars split the usable questions into the practice set and the final exam.</p>
+  <figure class="fig" data-fig="funnel"><div class="chart"></div><figcaption></figcaption></figure>
+</section>
 
 <section id="split-health">
   <h2>Split health</h2>
-  <p class="muted">Is the held-out exam comparable to the evolve set? Each check compares held-out with evolve against a fixed threshold; a warning means a held-out score change could come from a different exam rather than from the harness.</p>
-  <div class="health">
-    <div class="health-checks">
-      <table><thead><tr><th>check</th><th>status</th><th>numbers</th></tr></thead><tbody id="health-rows"></tbody></table>
-      <p class="muted small" id="health-thresholds"></p>
-    </div>
-    <div class="health-charts">
-      <div><h3>Module tree share</h3><div class="chart" id="c-h-tree"></div></div>
-      <div><h3>Area share</h3><div class="chart" id="c-h-area"></div></div>
-      <div><h3>Component share</h3><div class="chart" id="c-h-comp"></div></div>
-      <div><h3>Source churn</h3><div class="chart" id="c-h-churn"></div></div>
-      <div><h3>How the tests failed before the fix</h3><div class="chart" id="c-h-outcome"></div></div>
-    </div>
+  <p class="q"><b>Is the final exam (held-out) the same kind of exam as the practice set (evolve)? If not, its score can't tell learning from memorizing.</b></p>
+  <figure class="tbl" data-fig="health"><figcaption></figcaption>
+    <div class="tablewrap"><table class="health-table">
+      <thead><tr><th>Check</th><th>Result</th><th>What it means</th><th>Why it matters</th><th>What to do if it warns</th></tr></thead>
+      <tbody id="health-rows"></tbody>
+    </table></div>
+  </figure>
+  <p class="verdict-p" id="health-verdict"></p>
+  <div class="health-charts">
+    <figure class="fig" data-fig="size"><h3>Fix size</h3><p class="how"><b>How to read this:</b> each tick is one task, placed by how many lines its fix changed; the black mark and label are the median, the grey band its 95% interval.</p><div class="chart"></div><figcaption></figcaption></figure>
+    <figure class="fig" data-fig="tree"><h3>Code layout</h3><p class="how"><b>How to read this:</b> each bar is one set, colored by which module tree its tasks live in; labels give task count / set size. Matching bars mean both sets draw from the same code.</p><div class="chart"></div><figcaption></figcaption></figure>
+    <figure class="fig" data-fig="folders"><h3>Folders</h3><p class="how"><b>How to read this:</b> each bar is one set, colored by folder; grey &ldquo;other&rdquo; is every smaller folder.</p><div class="chart"></div><figcaption></figcaption></figure>
+    <figure class="fig" data-fig="subsystems"><h3>Subsystems</h3><p class="how"><b>How to read this:</b> like Folders, but a subsystem's service, command and library folders count together.</p><div class="chart"></div><figcaption></figcaption></figure>
+    <figure class="fig" data-fig="failkind"><h3>How the tests failed before the fix</h3><p class="how"><b>How to read this:</b> each bar splits a set by whether its tests did not compile before the fix (BuildFail) or compiled but failed a check (TestFail).</p><div class="chart"></div><figcaption></figcaption></figure>
   </div>
 </section>
 
-<section><h2>Rejections</h2><p class="muted">Why tasks left the funnel: miner reasons and each failing fairness stage.</p><div class="chart" id="c-reject"></div></section>
+<section id="sec-reject">
+  <h2>Why commits were dropped</h2>
+  <p class="q">Why were commits thrown out?</p>
+  <p class="how"><b>How to read this:</b> each bar counts the commits dropped for one reason; green reasons come from running the tests, purple ones from the fairness checks.</p>
+  <figure class="fig" data-fig="reject"><div class="chart"></div><figcaption></figcaption></figure>
+</section>
 
-<section><h2>Timeline</h2><p class="muted" id="timeline-note">One dot per task at its commit date; height is source churn. The dashed rule marks the held-out cutoff.</p><div class="chart" id="c-timeline"></div></section>
+<section id="sec-timeline">
+  <h2>Timeline</h2>
+  <p class="q">When was each task written, and which set did it go to?</p>
+  <p class="how"><b>How to read this:</b> each dot is one commit, left to right by date; higher means a bigger fix. Colors show the set; the dashed line marks where the final exam starts.</p>
+  <figure class="fig" data-fig="timeline"><div class="chart"></div><figcaption></figcaption></figure>
+</section>
 
-<div class="grid2">
-  <section><h2>Split balance</h2><p class="muted">Tasks per area (first three path segments of the primary package) and split.</p><div class="chart" id="c-balance"></div></section>
-  <section><h2>Difficulty</h2><p class="muted">Source churn (lines changed, log scale) per split, then how the hidden tests failed on the parent.</p><div class="chart" id="c-churn"></div><div class="chart" id="c-trans"></div></section>
-</div>
+<section id="sec-coverage">
+  <h2>Coverage by folder</h2>
+  <p class="q">Which parts of the code does each set cover?</p>
+  <p class="how"><b>How to read this:</b> one bar per folder; its colors show how many of its tasks are in the practice set, the final exam, or not used.</p>
+  <figure class="fig" data-fig="coverage"><div class="chart"></div><figcaption></figcaption></figure>
+</section>
 
-<section><h2>Examples</h2><p class="muted">Per split, the smallest-churn and the median-churn task. The reference fix stays collapsed.</p><div id="examples"></div></section>
+<section id="sec-examples">
+  <h2>Examples</h2>
+  <p class="q">What does a task look like?</p>
+  <p class="how"><b>How to read this:</b> two per set, the smallest task and a typical (median-size) one. Each card shows what the agent is asked, how it is graded and how it was checked; open the spoiler only if you want to see the real fix.</p>
+  <div id="examples"></div>
+</section>
 
-<section>
+<section id="browser">
   <h2>Task browser</h2>
-  <p class="muted">Click a row for its card.</p>
-  <div class="controls">
-    <input id="filter" type="search" placeholder="Filter by subject, sha, area, reason..." aria-label="Filter tasks">
-    <button class="chip" data-split="all" aria-pressed="true">all</button>
-    <button class="chip" data-split="evolve" aria-pressed="false"><span class="swatch s-evolve"></span>evolve</button>
-    <button class="chip" data-split="heldout" aria-pressed="false"><span class="swatch s-heldout"></span>held-out</button>
-    <button class="chip" data-split="excluded" aria-pressed="false"><span class="swatch s-excluded"></span>excluded</button>
-    <span class="muted" id="shown"></span>
-  </div>
-  <div class="tablewrap"><table>
-    <thead><tr><th>split</th><th>sha</th><th>date</th><th>area</th><th>subject</th><th>churn</th><th>parent &rarr; commit</th><th>fairness</th></tr></thead>
-    <tbody id="rows"></tbody>
-  </table></div>
+  <p class="q">Looking for one task?</p>
+  <p class="how"><b>How to read this:</b> type to filter, pick a set, and click a row to open its card.</p>
+  <figure class="tbl" data-fig="browser"><figcaption></figcaption>
+    <div class="controls">
+      <input id="filter" type="search" placeholder="Filter by subject, sha, folder, reason..." aria-label="Filter tasks">
+      <button class="chip" data-split="all" aria-pressed="true">all</button>
+      <button class="chip" data-split="evolve" aria-pressed="false"><span class="swatch s-evolve"></span>practice set (evolve)</button>
+      <button class="chip" data-split="heldout" aria-pressed="false"><span class="swatch s-heldout"></span>final exam (held-out)</button>
+      <button class="chip" data-split="excluded" aria-pressed="false"><span class="swatch s-excluded"></span>not used (excluded)</button>
+      <span class="muted" id="shown"></span>
+    </div>
+    <div class="tablewrap"><table>
+      <thead><tr><th>Set</th><th>sha</th><th>Commit date (UTC)</th><th>Folder</th><th>Subject</th><th>Fix size (lines changed)</th><th>Tests before &rarr; with the fix</th><th>Fairness</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table></div>
+  </figure>
 </section>
 <footer>Generated by rrsi-report. This page embeds private task source, tests and logs: keep it out of public places.</footer>
 </main>
@@ -180,10 +326,10 @@ footer { color: var(--ink-3); font-size: .8rem; margin-top: 24px; }
 (function () {
 "use strict";
 var D = JSON.parse(document.getElementById("rrsi-data").textContent);
-var S = D.summary, T = D.tasks;
+var S = D.summary, T = D.tasks, HL = D.health, ST = D.start;
 var STAGES = ["flake", "api", "describe", "probe", "specificity", "gate"];
 var SPLITS = ["evolve", "heldout", "excluded"];
-var LABEL = { evolve: "evolve", heldout: "held-out", excluded: "excluded" };
+var LABEL = { evolve: "practice set (evolve)", heldout: "final exam (held-out)", excluded: "not used (excluded)" };
 var bySha = {};
 T.forEach(function (t) { bySha[t.sha12] = t; });
 
@@ -198,27 +344,75 @@ function el(tag, attrs, kids) {
   return e;
 }
 function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
-function day(t) { return t.date ? t.date.slice(0, 10) : ""; }
+function day(t) { return t.ts != null ? new Date(t.ts * 1000).toISOString().slice(0, 10) : ""; }
 function transition(t) { return (t.parent_outcome || "?") + " → " + (t.commit_outcome || "?"); }
 function fairnessSummary(t) {
   var ran = STAGES.filter(function (s) { return t.fairness[s]; });
   if (!ran.length) return "not run";
   var failed = ran.filter(function (s) { return t.fairness[s].pass === false; });
-  if (t.fairness.gate) return (t.fairness.gate.pass ? "gate pass" : "gate fail") + (failed.length ? " (" + failed.join(", ") + ")" : "");
-  return ran.length + "/" + STAGES.length + " stages" + (failed.length ? ", failed " + failed.join(", ") : "");
+  if (t.fairness.gate) return (t.fairness.gate.pass ? "passed all" : "failed") + (failed.length ? " (" + failed.join(", ") + ")" : "");
+  return ran.length + " of " + STAGES.length + " stages run" + (failed.length ? ", failed " + failed.join(", ") : "");
 }
 
-// ---- header
-document.getElementById("rule").textContent = D.rule;
+// ---- header, tiles, methods
 document.getElementById("generated").textContent = "Generated " + D.generated_at +
-  (D.exam_lines != null ? " · exam.jsonl: " + D.exam_lines + " lines" : " · exam.jsonl not written yet") +
-  (D.has_dates ? "" : " · no --repo: commit dates unknown, held-out split by sha order");
-[["candidates", S.candidates], ["valid (FAIL_TO_PASS)", S.valid], ["pending retry", S.pending_retry],
- ["fairness ran", S.fairness_ran], ["exam-ready", S.exam_ready], ["evolve", S.evolve], ["held-out", S.heldout]
-].forEach(function (p) {
-  document.getElementById("stats").appendChild(el("div", { cls: "stat" }, [el("b", { text: String(p[1]) }), el("span", { text: p[0] })]));
+  (D.exam_lines != null ? " · exam.jsonl: " + D.exam_lines + " tasks" : " · exam.jsonl not written yet") +
+  (D.has_dates ? "" : " · no --repo: commit dates unknown, final exam chosen by sha order");
+document.getElementById("rule").textContent = D.rule;
+D.tiles.forEach(function (t) {
+  document.getElementById("tiles").appendChild(el("div", { cls: "tile" }, [
+    el("div", null, [el("span", { cls: "v", text: t.value }), el("span", { cls: "u", text: t.unit })]),
+    el("div", { cls: "l", text: t.label }), el("div", { cls: "d", text: t.definition })]));
+});
+D.methods.forEach(function (m) {
+  var dl = document.getElementById("methods");
+  dl.appendChild(el("dt", { text: m[0] })); dl.appendChild(el("dd", { text: m[1] }));
 });
 if (!S.fairness_ran) document.getElementById("fairness-missing").classList.remove("hidden");
+document.querySelectorAll("[data-fill]").forEach(function (e) { e.textContent = String(S[e.dataset.fill]); });
+
+// ---- captions (numbered, from report/figures.rs)
+D.figures.forEach(function (f) {
+  var fig = document.querySelector('[data-fig="' + f.id + '"]');
+  if (!fig) return;
+  var cap = fig.querySelector("figcaption");
+  cap.textContent = "";
+  cap.appendChild(el("span", { cls: "fn", text: f.kind + " " + f.number + ". " }));
+  cap.appendChild(el("span", { cls: "ft", text: f.title + (/[.?!)]$/.test(f.title) ? " " : ". ") }));
+  cap.appendChild(document.createTextNode(f.what + " Unit: " + f.unit + ". n: " + f.n + ". Computed: " + f.how + "."));
+  cap.appendChild(el("span", { cls: "tk" }, [el("b", { text: "Takeaway: " }), f.takeaway]));
+});
+
+// ---- task browser filter jump (used by the headline)
+function jumpToFilter(text, split) {
+  var f = document.getElementById("filter");
+  f.value = text;
+  var chip = document.querySelector('.chip[data-split="' + (split || "all") + '"]');
+  if (chip) chip.click(); else apply();
+  document.getElementById("browser").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+// ---- headline
+(function () {
+  var H = ST.headline;
+  document.getElementById("hl-before").textContent = H.before;
+  document.getElementById("hl-now").textContent = H.now;
+  var ul = document.getElementById("hl-tries");
+  H.tries.forEach(function (t) {
+    var li = el("li", { cls: t.future ? "future" : "" });
+    if (t.future) li.appendChild(el("span", { cls: "tag", text: "not yet possible" }));
+    li.appendChild(el("b", { text: t.lead + " " }));
+    li.appendChild(document.createTextNode(t.text));
+    if (t.filter) {
+      var a = el("a", { cls: "jump", href: "#browser", text: " Show them in the task browser →" });
+      a.addEventListener("click", function (ev) { ev.preventDefault(); jumpToFilter(t.filter, "excluded"); });
+      li.appendChild(a);
+    }
+    ul.appendChild(li);
+  });
+  document.getElementById("hl-not").textContent = H.not_shown;
+  H.bullets.forEach(function (b) { document.getElementById("hl-bullets").appendChild(el("li", { text: b })); });
+})();
 
 // ---- cards
 function verdicts(t) {
@@ -226,8 +420,7 @@ function verdicts(t) {
   STAGES.forEach(function (s) {
     var v = t.fairness[s];
     var cls = !v ? "none" : v.pass === true ? "pass" : v.pass === false ? "fail" : "none";
-    var txt = s + ": " + (!v ? "not run" : v.pass === true ? "pass" : v.pass === false ? "fail" : "?");
-    var b = el("span", { cls: "verdict " + cls, text: txt });
+    var b = el("span", { cls: "verdict " + cls, text: s + ": " + (!v ? "not run" : v.pass === true ? "pass" : v.pass === false ? "fail" : "?") });
     if (v && v.reason) b.title = v.reason;
     box.appendChild(b);
   });
@@ -238,49 +431,136 @@ function verdicts(t) {
 }
 function requiredApi(t) {
   var api = t.fairness.api;
-  if (!api) return el("p", { cls: "muted", text: "Not computed yet (fairness/api.json absent)." });
-  var list = null;
-  Object.keys(api).forEach(function (k) {
-    var v = api[k];
-    if (!list && Array.isArray(v) && v.length && typeof v[0] === "object" && v[0] && "symbol" in v[0]) list = v;
-  });
-  if (list) return el("pre", { cls: "wrap", text: list.map(function (r) {
+  if (!api) return el("p", { cls: "muted", text: "Not computed yet (the api stage has not run)." });
+  var list = Array.isArray(api.required) ? api.required : null;
+  if (list) return el("pre", { cls: "wrap", text: list.length ? list.map(function (r) {
     return r.signature || ((r.kind ? r.kind + " " : "") + r.symbol);
-  }).join("\n") });
-  var rest = {};
-  Object.keys(api).forEach(function (k) { if (k !== "stage" && k !== "pass" && k !== "reason") rest[k] = api[k]; });
-  return el("pre", { cls: "wrap", text: Object.keys(rest).length ? JSON.stringify(rest, null, 2) : "(no API listed)" });
+  }).join("\n") : "(no new names needed)" });
+  return el("pre", { cls: "wrap", text: JSON.stringify(api, null, 2) });
 }
 function fold(label, text, cls) {
-  var d = el("details", cls ? { cls: cls } : null, [el("summary", { text: label }), el("pre", { text: text || "(empty)" })]);
-  return d;
+  return el("details", cls ? { cls: cls } : null, [el("summary", { text: label }), el("pre", { text: text || "(empty)" })]);
 }
 function card(t) {
   var c = el("div", { cls: "card" });
   c.appendChild(el("h3", { text: t.subject || "(no subject)" }));
   c.appendChild(el("div", { cls: "meta" }, [
     el("span", { cls: "swatch s-" + t.split }), el("span", { cls: "split-tag", text: LABEL[t.split] }),
-    " · ", el("span", { cls: "mono", text: t.sha12 }), " · " + (day(t) || "no date") + " · " + t.area +
-    " · churn " + t.src_churn]));
+    " · ", el("span", { cls: "mono", text: t.sha12 }), " · committed " + (day(t) || "(no date)") + " UTC · folder " + t.area +
+    " · fix size " + t.src_churn + " lines changed"]));
   var dl = el("dl");
   function row(k, v) { dl.appendChild(el("dt", { text: k })); dl.appendChild(el("dd", null, [v])); }
-  row("outcome", transition(t) + (t.valid ? " (valid)" : " (" + t.reason + ")"));
-  if (t.excluded_reason) row("excluded", t.excluded_reason);
+  row("tests before → with the fix", transition(t) + (t.valid ? " (valid question)" : " (" + t.reason + ")"));
+  if (t.excluded_reason) row("not used because", t.excluded_reason);
   row("packages", t.module_root + ": " + t.packages.join(", "));
-  row("hidden tests", t.test_files.join(", ") || "-");
+  row("hidden test files", t.test_files.join(", ") || "-");
   c.appendChild(dl);
-  c.appendChild(el("h3", { text: "Instruction" }));
-  c.appendChild(t.instruction ? el("pre", { cls: "wrap", text: t.instruction }) : el("p", { cls: "muted", text: "Not written yet (instruction.md absent)." }));
-  c.appendChild(el("h3", { text: "Required API" }));
+  c.appendChild(el("h3", { text: "What the agent is asked" }));
+  c.appendChild(t.instruction ? el("pre", { cls: "wrap", text: t.instruction }) : el("p", { cls: "muted", text: "Not written yet (the describe stage has not run)." }));
+  c.appendChild(el("h3", { text: "Names the hidden tests need" }));
   c.appendChild(requiredApi(t));
-  c.appendChild(el("h3", { text: "Fairness" }));
+  c.appendChild(el("h3", { text: "Fairness verdicts" }));
   c.appendChild(verdicts(t));
   c.appendChild(fold("Hidden tests (tests.patch)", t.tests_patch));
   c.appendChild(fold("SPOILER: the reference fix", t.src_patch, "spoiler"));
-  c.appendChild(fold("parent.log (tail)", t.parent_log_tail));
-  c.appendChild(fold("commit.log (tail)", t.commit_log_tail));
+  c.appendChild(fold("Test log before the fix (last lines)", t.parent_log_tail));
+  c.appendChild(fold("Test log with the fix (last lines)", t.commit_log_tail));
   return c;
 }
+
+// ---- start here
+(function () {
+  var box = document.getElementById("worked"), w = ST.worked;
+  if (!w) { box.appendChild(el("p", { cls: "muted", text: "No exam-ready task yet, so there is no example to show." })); return; }
+  var n = 0;
+  function step(title, kids, cls) {
+    n++;
+    box.appendChild(el("div", { cls: "step" + (cls ? " " + cls : "") }, [el("div", { cls: "n", text: String(n) }),
+      el("div", null, [el("div", { cls: "t", text: title })].concat(kids))]));
+  }
+  step("A real past commit", [el("div", { text: "“" + w.subject + "”" }),
+    el("div", { cls: "muted small", text: w.sha12 + " · now in the " + LABEL[w.split] })]);
+  step("What the agent is asked", [w.instruction ? el("pre", { cls: "wrap", text: w.instruction }) :
+    el("p", { cls: "muted", text: "Not written yet. The agent will get a plain description of the problem that does not give away the fix. Until then, all we have is the commit title above." })]);
+  step("How it is graded: hidden tests the agent never sees", [el("div", { cls: "muted small mono", text: w.test_file }),
+    el("pre", { text: w.test_excerpt || "(no excerpt)" })]);
+  step("Before the fix, those tests fail (" + (w.parent_outcome === "BuildFail" ? "they do not even compile" : "a check fails") + ")",
+    [el("pre", { text: w.parent_failure || "(see the test log)" })], "bad");
+  step("With the real fix, they pass", [el("pre", { text: w.commit_ok })], "good");
+  step("So this is a fair question: it can be failed, and it can be passed.", [], "good");
+  var fix = document.getElementById("we-fix");
+  fix.querySelector("pre").textContent = (bySha[w.sha12] || {}).src_patch || "";
+  fix.classList.remove("hidden");
+})();
+(function () {
+  var rows = document.getElementById("why-rows");
+  function ex(ref, fallback, extra) {
+    if (!ref) return el("span", { cls: "muted", text: fallback });
+    return el("div", null, [el("div", { text: "“" + ref.subject + "”" }),
+      el("div", { cls: "muted small mono", text: ref.sha12 }), ref.detail ? el("pre", { cls: "wrap", text: ref.detail }) : null, extra || null]);
+  }
+  function reasonCount(needle) {
+    return S.rejections.filter(function (r) { return r[0].indexOf(needle) >= 0; }).reduce(function (a, r) { return a + r[2]; }, 0);
+  }
+  var infra = ST.goproxy_line ? el("div", null, [el("pre", { cls: "wrap", text: ST.goproxy_line }),
+      el("div", { cls: "muted small", text: ST.goproxy_logs + " of " + (2 * S.candidates) + " test logs here contain these words; " + ST.pending_retry + " commits are waiting for a retry." })])
+    : el("span", { cls: "muted", text: "No test log here contains the message now; " + ST.pending_retry + " commits are waiting for a retry." });
+  var hw = ST.health_warnings.length ? el("div", null, [el("ul", null, ST.health_warnings.map(function (h) { return el("li", { text: h }); })),
+      el("a", { href: "#split-health", text: "See Split health" })])
+    : el("span", { text: "Split health shows no warnings." });
+  [
+    ["Tests already pass before the fix",
+     "An agent that changes nothing would still “pass”. The question tests nothing.",
+     ex(ST.already_passes, "No such commit here.", el("div", { cls: "muted small", text: reasonCount("already pass") + " of " + S.candidates + " candidate commits were dropped for this." }))],
+    ["Tests still fail with the real fix",
+     "Nobody could pass it, however good. It only adds noise to the score.",
+     ex(ST.fails_on_commit, "No such commit here.", el("div", { cls: "muted small", text: reasonCount("fail on the commit") + " of " + S.candidates + " candidate commits were dropped for this." }))],
+    ["Download failures are not test failures",
+     "A task could look broken, or look valid, because the network was switched off rather than because of the code. This happened on 2026-09-30. Go prints the same words (“module lookup disabled by GOPROXY=off”) for a failed download and for a test that imports code the old version does not have yet. The grader now tells them apart: the first is marked “Infra” and retried; the second is a real build failure.",
+     infra],
+    ["Instructions must not leak the fix",
+     "If the instruction spells out the code, the agent copies it and the score measures copying, not problem solving. The describe stage compares each instruction with the real fix.",
+     ex(ST.leak, S.fairness_ran ? "No instruction failed this check." : "Not checked yet: instructions are not written.")],
+    ["Instructions must name what the tests need",
+     "If a hidden test calls a function by a name nobody told the agent, passing means guessing the name. The api and probe stages list the names the tests use and check that the instruction gives them.",
+     ex(ST.missing_name, "No example found.")],
+    ["The final exam is the newest tasks, not a random pick",
+     "A random pick could put an older task in the exam while newer practice tasks hint at its answer. Using the newest mimics real life: learn from the past, get tested on what came next.",
+     el("span", { text: "Here: the " + S.heldout + " newest of " + S.exam_ready + " exam-ready tasks" + (S.cutoff ? ", committed from " + S.cutoff.slice(0, 10) + " on." : ".") })],
+    ["The final exam must look like the practice set",
+     "If the exam is much harder, or all about one part of the code, a lower exam score would look like memorizing when the exam was simply harder.",
+     hw],
+    ["Tests must not be flaky",
+     "If the same code passes on one run and fails on the next, luck looks like improvement. The flake stage reruns each task's tests to catch this.",
+     ex(ST.flaky, S.fairness_ran ? "No flaky task found." : "Not checked yet: the flake stage has not run.")]
+  ].forEach(function (r) { rows.appendChild(el("tr", null, [el("td", { text: r[0] }), el("td", { text: r[1] }), el("td", null, [r[2]])])); });
+})();
+(function () {
+  var ol = document.getElementById("pipeline");
+  ST.pipeline.forEach(function (p) {
+    var label = p.status === "next" ? "next up" : p.status === "partial" ? "in progress" : p.status;
+    ol.appendChild(el("li", { cls: p.status.replace(" ", "-") }, [el("b", { text: p.name }), el("span", { cls: "st", text: label }), el("span", { cls: "d", text: p.detail })]));
+  });
+})();
+
+// ---- split health table
+(function () {
+  var body = document.getElementById("health-rows");
+  HL.checks.forEach(function (c) {
+    var cls = c.status === "warn" ? "warn" : c.status === "pass" ? "pass" : "na";
+    var mark = c.status === "warn" ? "⚠ warn" : c.status === "pass" ? "✓ pass" : "n/a";
+    body.appendChild(el("tr", { cls: "hc " + cls }, [
+      el("td", { cls: "hc-name", text: c.name }),
+      el("td", null, [el("span", { cls: "status " + cls, text: mark })]),
+      el("td", { text: c.meaning }),
+      el("td", null, [c.why, el("div", { cls: "muted small", text: "Threshold (heuristic for this prototype): " + c.threshold + " — " + c.rationale + "." })]),
+      el("td", { cls: c.status === "warn" ? "" : "muted", text: c.action })]));
+  });
+  var v = document.getElementById("health-verdict");
+  v.appendChild(el("b", { text: "Verdict: " }));
+  v.appendChild(document.createTextNode(HL.verdict));
+  v.classList.add(HL.warnings ? "warn" : "pass");
+})();
 
 // ---- examples
 var ex = document.getElementById("examples");
@@ -288,7 +568,7 @@ SPLITS.forEach(function (s) {
   var picks = (D.examples[s] || []).map(function (h) { return bySha[h]; }).filter(Boolean);
   var wrap = el("div", null, [el("h3", null, [el("span", { cls: "swatch s-" + s }), LABEL[s]])]);
   var grid = el("div", { cls: "examples" });
-  if (!picks.length) grid.appendChild(el("p", { cls: "muted", text: "No tasks in this split." }));
+  if (!picks.length) grid.appendChild(el("p", { cls: "muted", text: "No tasks in this set." }));
   picks.forEach(function (t) { grid.appendChild(card(t)); });
   wrap.appendChild(grid);
   wrap.style.marginBottom = "16px";
@@ -310,7 +590,7 @@ var trs = order.map(function (t) {
     el("td", { text: t.subject }), el("td", { cls: "num", text: String(t.src_churn) }),
     el("td", { cls: "nw", text: transition(t) }), el("td", { text: fairnessSummary(t) })]);
   tr.dataset.split = t.split;
-  tr.dataset.hay = [t.sha12, t.subject, t.area, t.reason, t.excluded_reason || "", t.split, day(t), transition(t)].join(" ").toLowerCase();
+  tr.dataset.hay = [t.sha12, t.subject, t.area, t.reason, t.excluded_reason || "", LABEL[t.split], day(t), transition(t)].join(" ").toLowerCase();
   var detail = null;
   tr.addEventListener("click", function () {
     if (detail) { detail.remove(); detail = null; tr.classList.remove("open"); return; }
@@ -329,7 +609,7 @@ function apply() {
     var d = tr._detail(); if (d) d.classList.toggle("hidden", !ok);
     if (ok) n++;
   });
-  document.getElementById("shown").textContent = n + " of " + trs.length + " shown";
+  document.getElementById("shown").textContent = n + " of " + trs.length + " tasks shown";
 }
 filter.addEventListener("input", apply);
 document.querySelectorAll(".chip").forEach(function (b) {
@@ -341,214 +621,35 @@ document.querySelectorAll(".chip").forEach(function (b) {
 });
 apply();
 
-// ---- split health table
-var HL = D.health;
-(function () {
-  var body = document.getElementById("health-rows");
-  HL.checks.forEach(function (c) {
-    var cls = c.status === "warn" ? "warn" : c.status === "pass" ? "pass" : "na";
-    var mark = c.status === "warn" ? "\u26a0 warn" : c.status === "pass" ? "\u2713 pass" : "n/a";
-    body.appendChild(el("tr", null, [el("td", { text: c.name }), el("td", null, [el("span", { cls: "status " + cls, text: mark })]),
-      el("td", { text: c.detail })]));
-  });
-  var th = HL.thresholds;
-  document.getElementById("health-thresholds").textContent = "Thresholds: held-out median churn within " +
-    th.churn_ratio[0] + "\u2013" + th.churn_ratio[1] + "x of evolve; no area or component above " + Math.round(th.max_heldout_area_share * 100) +
-    "% of held-out; module-tree and outcome shares within " + Math.round(th.max_tree_share_diff * 100) + " points; held-out spans at least " +
-    th.min_heldout_span_days + " days. Evolve n=" + HL.evolve.n + ", held-out n=" + HL.heldout.n + ".";
-})();
-
-// ---- charts
+// ---- charts (Vega-Lite specs from report/figures.rs)
+function note(fig, text) { var c = fig.querySelector(".chart"); if (c) c.appendChild(el("p", { cls: "muted", text: text })); }
 if (typeof vegaEmbed === "undefined") {
   document.getElementById("vega-missing").classList.remove("hidden");
-  document.querySelectorAll(".chart").forEach(function (c) { c.appendChild(el("p", { cls: "muted", text: "Chart unavailable: Vega did not load." })); });
+  D.figures.forEach(function (f) { var fig = document.querySelector('[data-fig="' + f.id + '"]'); if (fig && f.kind === "Figure") note(fig, "Chart unavailable: Vega did not load."); });
   return;
 }
+function resolve(v) {
+  if (typeof v === "string") return v.indexOf("token:") === 0 ? css("--" + v.slice(6)) : v;
+  if (Array.isArray(v)) return v.map(resolve);
+  if (v && typeof v === "object") { var o = {}; Object.keys(v).forEach(function (k) { o[k] = resolve(v[k]); }); return o; }
+  return v;
+}
 var ink = css("--ink"), ink2 = css("--ink-2"), border = css("--border");
-var splitScale = { domain: SPLITS, range: [css("--evolve"), css("--heldout"), css("--excluded")] };
-var splitLegend = { labelExpr: "datum.label === 'heldout' ? 'held-out' : datum.label" };
 var config = {
   background: null, font: "system-ui, -apple-system, Segoe UI, sans-serif",
   view: { stroke: null },
-  axis: { labelColor: ink2, titleColor: ink2, gridColor: border, domainColor: border, tickColor: border, labelFontSize: 11, titleFontWeight: 500 },
-  legend: { labelColor: ink2, titleColor: ink2, orient: "top" },
-  header: { labelColor: ink2, titleColor: ink2 },
+  axis: { labelColor: ink2, titleColor: ink, gridColor: border, domainColor: border, tickColor: border, labelFontSize: 11, titleFontSize: 12, titleFontWeight: 600 },
+  legend: { labelColor: ink2, titleColor: ink, titleFontWeight: 600, orient: "top" },
   text: { color: ink }, bar: { cornerRadiusEnd: 3 }
 };
-function draw(id, spec) {
-  spec.$schema = "https://vega.github.io/schema/vega-lite/v5.json";
+D.figures.forEach(function (f) {
+  if (f.kind !== "Figure") return;
+  var fig = document.querySelector('[data-fig="' + f.id + '"]');
+  if (!fig) return;
+  if (!f.spec) { note(fig, "No data for this figure: " + f.takeaway); return; }
+  var spec = resolve(f.spec);
   spec.config = config;
-  if (!spec.width) spec.width = "container";
-  vegaEmbed("#" + id, spec, { actions: false, renderer: "svg" }).catch(function (e) {
-    document.getElementById(id).appendChild(el("p", { cls: "muted", text: "Chart failed: " + e }));
-  });
-}
-
-var funnel = [
-  { step: "candidates", n: S.candidates, kind: "all" },
-  { step: "valid", n: S.valid, kind: "all" },
-  { step: "exam-ready", n: S.exam_ready, kind: "all" },
-  { step: "evolve", n: S.evolve, kind: "evolve" },
-  { step: "held-out", n: S.heldout, kind: "heldout" }];
-draw("c-funnel", {
-  height: 190, data: { values: funnel },
-  encoding: { y: { field: "step", type: "nominal", sort: null, title: null },
-              x: { field: "n", type: "quantitative", title: "tasks", axis: { tickMinStep: 1, format: "d" } } },
-  layer: [
-    { mark: { type: "bar", height: { band: 0.7 } },
-      encoding: { color: { field: "kind", type: "nominal", legend: null,
-        scale: { domain: ["all", "evolve", "heldout"], range: [ink2, splitScale.range[0], splitScale.range[1]] } },
-        tooltip: [{ field: "step" }, { field: "n", title: "tasks" }] } },
-    { mark: { type: "text", align: "left", dx: 4, color: ink }, encoding: { text: { field: "n" } } }]
-});
-
-var rej = S.rejections.map(function (r) { return { reason: r[0], kind: r[1], n: r[2] }; });
-if (!rej.length) document.getElementById("c-reject").appendChild(el("p", { cls: "muted", text: "No rejections." }));
-else draw("c-reject", {
-  height: { step: 26 }, data: { values: rej },
-  encoding: { y: { field: "reason", type: "nominal", sort: "-x", title: null, axis: { labelLimit: 260 } },
-              x: { field: "n", type: "quantitative", title: "tasks", axis: { tickMinStep: 1, format: "d" } } },
-  layer: [
-    { mark: { type: "bar", height: { band: 0.7 } },
-      encoding: { color: { field: "kind", type: "nominal", title: "source",
-        scale: { domain: ["mine", "fairness"], range: [css("--mine"), css("--fair")] } },
-        tooltip: [{ field: "reason" }, { field: "kind", title: "source" }, { field: "n", title: "tasks" }] } },
-    { mark: { type: "text", align: "left", dx: 4, color: ink }, encoding: { text: { field: "n" } } }]
-});
-
-var dated = T.filter(function (t) { return t.date; }).map(function (t) {
-  return { date: t.date, split: t.split, subject: t.subject, sha: t.sha12, churn: Math.max(1, t.src_churn), area: t.area,
-           why: t.excluded_reason || "" };
-});
-if (!dated.length) {
-  document.getElementById("timeline-note").textContent = "No commit dates (run with --repo PATH): timeline skipped.";
-} else {
-  var layers = [{
-    mark: { type: "point", filled: true, size: 70, opacity: 0.85, stroke: css("--panel"), strokeWidth: 1 },
-    encoding: {
-      x: { field: "date", type: "temporal", title: "commit date" },
-      y: { field: "churn", type: "quantitative", scale: { type: "log" }, title: "source churn (log)" },
-      color: { field: "split", type: "nominal", scale: splitScale, legend: splitLegend, title: "split" },
-      tooltip: [{ field: "subject" }, { field: "sha" }, { field: "date", type: "temporal", format: "%Y-%m-%d %H:%M" },
-                { field: "split" }, { field: "area" }, { field: "churn" }, { field: "why", title: "excluded because" }] } }];
-  if (S.cutoff) layers.push({
-    data: { values: [{ cutoff: S.cutoff, label: "held-out cutoff" }] },
-    layer: [
-      { mark: { type: "rule", strokeDash: [5, 4], color: splitScale.range[1], strokeWidth: 1.5 },
-        encoding: { x: { field: "cutoff", type: "temporal" } } },
-      { mark: { type: "text", align: "right", dx: -4, dy: 8, baseline: "top", color: ink2, fontSize: 11 },
-        encoding: { x: { field: "cutoff", type: "temporal" }, y: { value: 0 }, text: { field: "label" } } }] });
-  draw("c-timeline", { height: 260, data: { values: dated }, layer: layers });
-}
-
-var bal = T.map(function (t) { return { area: t.area, split: t.split }; });
-draw("c-balance", {
-  height: { step: 20 }, data: { values: bal },
-  mark: { type: "bar", height: { band: 0.75 }, stroke: css("--panel"), strokeWidth: 1 },
-  encoding: {
-    y: { field: "area", type: "nominal", sort: "-x", title: null, axis: { labelLimit: 240 } },
-    x: { aggregate: "count", type: "quantitative", title: "tasks" },
-    color: { field: "split", type: "nominal", scale: splitScale, legend: splitLegend, title: "split" },
-    order: { field: "split", sort: "ascending" },
-    tooltip: [{ field: "area" }, { field: "split" }, { aggregate: "count", title: "tasks" }] }
-});
-
-var churn = T.map(function (t) { return { split: t.split, churn: Math.max(1, t.src_churn), subject: t.subject, sha: t.sha12 }; });
-draw("c-churn", {
-  height: { step: 44 }, data: { values: churn },
-  encoding: { y: { field: "split", type: "nominal", sort: SPLITS, title: null, axis: { labelExpr: splitLegend.labelExpr } },
-              x: { field: "churn", type: "quantitative", scale: { type: "log" }, title: "source churn (lines, log)" } },
-  layer: [
-    { mark: { type: "boxplot", extent: 1.5, size: 26, opacity: 0.35, median: { color: ink }, outliers: false },
-      encoding: { color: { field: "split", type: "nominal", scale: splitScale, legend: null } } },
-    { mark: { type: "tick", thickness: 2, size: 18 },
-      encoding: { color: { field: "split", type: "nominal", scale: splitScale, legend: null },
-        tooltip: [{ field: "subject" }, { field: "sha" }, { field: "churn" }] } }]
-});
-
-var tr = T.filter(function (t) { return t.parent_outcome && t.commit_outcome; })
-  .map(function (t) { return { split: t.split, label: LABEL[t.split], transition: transition(t) }; });
-draw("c-trans", {
-  width: 360, height: { step: 18 }, data: { values: tr },
-  mark: { type: "bar", height: { band: 0.75 } },
-  encoding: {
-    row: { field: "label", type: "nominal", sort: SPLITS.map(function (x) { return LABEL[x]; }), title: null, header: { labelAngle: 0, labelAlign: "left" } },
-    y: { field: "transition", type: "nominal", title: null, sort: "-x" },
-    x: { aggregate: "count", type: "quantitative", title: "tasks (parent → commit outcome)" },
-    color: { field: "split", type: "nominal", scale: splitScale, legend: null },
-    tooltip: [{ field: "split" }, { field: "transition" }, { aggregate: "count", title: "tasks" }] },
-  resolve: { scale: { y: "independent" } }
-});
-
-// ---- split health charts
-var CAT = ["#1baf7a", "#4a3aa7", "#eda100", "#e87ba4", "#008300", "#e34948"];
-if (matchMedia("(prefers-color-scheme: dark)").matches) CAT = ["#199e70", "#9085e9", "#c98500", "#d55181", "#008300", "#e66767"];
-function shareRows(field) {
-  var out = [];
-  ["evolve", "heldout"].forEach(function (s) {
-    var m = HL[s][field];
-    Object.keys(m).forEach(function (k) { out.push({ split: LABEL[s], key: k, share: m[k] }); });
-  });
-  return out;
-}
-function shareChart(id, rows, keys, title) {
-  var range = keys.map(function (k, i) { return k === "other" ? css("--excluded") : CAT[i % CAT.length]; });
-  draw(id, {
-    height: { step: 34 }, data: { values: rows },
-    transform: [{ calculate: "format(datum.share, '.0%')", as: "pct" }],
-    encoding: { y: { field: "split", type: "nominal", sort: ["evolve", "held-out"], title: null },
-                x: { field: "share", type: "quantitative", stack: "normalize", title: null, axis: { format: "%" } },
-                order: { field: "key", sort: "ascending" } },
-    layer: [
-      { mark: { type: "bar", height: { band: 0.72 }, stroke: css("--panel"), strokeWidth: 2, cornerRadiusEnd: 0 },
-        encoding: { color: { field: "key", type: "nominal", title: title, scale: { domain: keys, range: range },
-                             legend: { orient: "bottom", columns: 2, labelLimit: 220 } },
-                    tooltip: [{ field: "split" }, { field: "key", title: title }, { field: "pct", title: "share" }] } },
-      { transform: [{ filter: "datum.share >= 0.1" }],
-        mark: { type: "text", color: "#ffffff", fontSize: 11, fontWeight: 600 },
-        encoding: { x: { field: "share", type: "quantitative", stack: "normalize", bandPosition: 0.5 },
-                    text: { field: "pct" }, detail: { field: "key" } } }]
-  });
-}
-function keysOf(field, lastOther) {
-  var ks = {};
-  ["evolve", "heldout"].forEach(function (s) { Object.keys(HL[s][field]).forEach(function (k) { ks[k] = 1; }); });
-  var list = Object.keys(ks).sort();
-  if (lastOther && ks.other) { list = list.filter(function (k) { return k !== "other"; }); list.push("other"); }
-  return list;
-}
-shareChart("c-h-tree", shareRows("module_tree"), keysOf("module_tree"), "module tree");
-var areaKeys = HL.top_areas.filter(function (a) { return keysOf("area_top").indexOf(a) >= 0; });
-if (keysOf("area_top").indexOf("other") >= 0) areaKeys.push("other");
-shareChart("c-h-area", shareRows("area_top"), areaKeys, "area");
-var compRows = shareRows("component"), compTotals = {};
-compRows.forEach(function (r) { compTotals[r.key] = (compTotals[r.key] || 0) + r.share; });
-var compTop = Object.keys(compTotals).sort(function (a, b) { return compTotals[b] - compTotals[a] || (a < b ? -1 : 1); }).slice(0, 6);
-var compFold = {};
-compRows.forEach(function (r) { var k = compTop.indexOf(r.key) >= 0 ? r.key : "other"; var id = r.split + "|" + k;
-  compFold[id] = compFold[id] || { split: r.split, key: k, share: 0 }; compFold[id].share += r.share; });
-var compKeys = compTop.slice().sort(); if (compTop.length < Object.keys(compTotals).length) compKeys.push("other");
-shareChart("c-h-comp", Object.keys(compFold).map(function (k) { return compFold[k]; }), compKeys, "component");
-shareChart("c-h-outcome", shareRows("outcome"), keysOf("outcome"), "parent \u2192 commit");
-var hc = T.filter(function (t) { return t.split !== "excluded"; })
-  .map(function (t) { return { split: LABEL[t.split], churn: Math.max(1, t.src_churn), subject: t.subject, sha: t.sha12 }; });
-var meds = ["evolve", "heldout"].filter(function (s) { return HL[s].churn_median != null; }).map(function (s) {
-  return { split: LABEL[s], median: HL[s].churn_median, q1: HL[s].churn_q1, q3: HL[s].churn_q3,
-           label: "median " + HL[s].churn_median + " (IQR " + HL[s].churn_q1 + "\u2013" + HL[s].churn_q3 + ")" };
-});
-var hScale = { domain: ["evolve", "held-out"], range: [css("--evolve"), css("--heldout")] };
-draw("c-h-churn", {
-  height: { step: 56 },
-  encoding: { y: { field: "split", type: "nominal", sort: ["evolve", "held-out"], title: null } },
-  layer: [
-    { data: { values: hc }, mark: { type: "tick", thickness: 2, size: 20, opacity: 0.7 },
-      encoding: { x: { field: "churn", type: "quantitative", scale: { type: "log" }, title: "source churn (lines, log)" },
-                  color: { field: "split", type: "nominal", scale: hScale, legend: null },
-                  tooltip: [{ field: "subject" }, { field: "sha" }, { field: "churn" }] } },
-    { data: { values: meds }, mark: { type: "tick", thickness: 3, size: 34, color: ink },
-      encoding: { x: { field: "median", type: "quantitative" }, tooltip: [{ field: "label" }] } },
-    { data: { values: meds }, mark: { type: "text", dy: -22, fontSize: 11, fontWeight: 600, color: ink },
-      encoding: { x: { field: "median", type: "quantitative" }, text: { field: "label" } } }]
+  vegaEmbed(fig.querySelector(".chart"), spec, { actions: false, renderer: "svg" }).catch(function (e) { note(fig, "Chart failed: " + e); });
 });
 })();
 </script>

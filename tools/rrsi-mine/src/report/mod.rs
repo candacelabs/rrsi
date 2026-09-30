@@ -15,11 +15,14 @@
 //! The `rrsi-report` binary's modules: loading a task directory, the split
 //! rule, the HTML rendering and the work-tree guard.
 
+pub mod explain;
+pub mod figures;
 pub mod guard;
 pub mod health;
 pub mod load;
 pub mod render;
 pub mod split;
+pub mod stats;
 
 #[cfg(test)]
 mod tests;

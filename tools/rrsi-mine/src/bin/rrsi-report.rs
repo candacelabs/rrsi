@@ -44,6 +44,13 @@ struct Cli {
     /// How many of the newest exam-ready tasks are held out.
     #[arg(long, default_value_t = 10)]
     heldout: usize,
+    /// The --since the miner ran with (the task files do not record it);
+    /// shown in the report's methods box.
+    #[arg(long, default_value = "2026-06-01")]
+    since: String,
+    /// The Go container image the miner validated with (methods box).
+    #[arg(long, env = "RRSI_GO_IMAGE", default_value = "golang:1.26.5")]
+    go_image: String,
     /// The HTML report to write.
     #[arg(long)]
     out: PathBuf,
@@ -80,8 +87,13 @@ fn main() -> Result<()> {
     let exam = report::load::exam_lines(&cli.tasks);
     let splits = report::split::assign(&mut tasks, cli.heldout);
     let health = report::health::health(&tasks);
-    let html = report::render::render(&tasks, &splits, &health, cli.heldout, exam,
-                                      &report::render::now_utc())?;
+    let start = report::explain::start(&tasks, &cli.tasks, &report::split::summarize(&tasks), &health);
+    let prov = report::figures::Provenance { since: &cli.since, go_image: &cli.go_image, heldout: cli.heldout };
+    let page = report::figures::build(&tasks, &report::split::summarize(&tasks), &health, &prov);
+    let html = report::render::render(&report::render::Inputs {
+        tasks: &tasks, splits: &splits, health: &health, start: &start, page: &page,
+        heldout: cli.heldout, exam_lines: exam,
+    }, &report::render::now_utc())?;
     std::fs::write(&cli.out, html).with_context(|| format!("writing {}", cli.out.display()))?;
     if let Some(p) = &cli.splits_out {
         let out = serde_json::json!({

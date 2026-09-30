@@ -28,9 +28,10 @@ use std::collections::BTreeMap;
 
 /// The rule in one sentence, as the report states it.
 pub fn rule_sentence(n: usize) -> String {
-    format!("A task is exam-ready when it is FAIL_TO_PASS valid and, once fairness has run, \
-             passed the gate; the newest {n} exam-ready tasks by commit date are held out \
-             (ties broken by sha), the rest evolve, and every other task is excluded.")
+    format!("A commit becomes an exam question when its tests fail before the real fix and pass \
+             after it and, once fairness checks have run, it passed all of them; the newest {n} \
+             questions by commit date are the final exam (held-out), the rest are the practice set \
+             (evolve), and every other commit is not used (excluded).")
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Serialize)]

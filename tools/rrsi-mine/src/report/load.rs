@@ -71,6 +71,10 @@ pub struct Task {
     pub ts: Option<i64>,
     pub split: Split,
     pub excluded_reason: Option<String>,
+    /// Wall-clock seconds the miner spent validating this task.
+    pub seconds: f64,
+    /// When task.json (or retry.json) was written, unix seconds.
+    pub written_at: Option<i64>,
 }
 
 impl Task {
@@ -194,6 +198,9 @@ pub fn load_task(dir: &Path) -> Result<Option<Task>> {
         ts: None,
         split: Split::Excluded,
         excluded_reason: None,
+        seconds: meta.get("seconds").and_then(Value::as_f64).unwrap_or(0.0),
+        written_at: std::fs::metadata(&meta_path).and_then(|m| m.modified()).ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64),
     }))
 }
 
