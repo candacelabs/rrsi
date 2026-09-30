@@ -4,15 +4,21 @@
 
 ## Changes
 
-<!-- Bullet list, one line per change, with file links. -->
+| Area | File | Change |
+|---|---|---|
+| | | |
 
 ## Verification
 
-<!-- Exact commands run and their results. Say plainly what failed or was skipped. -->
+| Check | Command | Result |
+|---|---|---|
+| | | |
 
 ## Not done / follow-ups
 
-<!-- Open items, deferred work, or "None". -->
+| Item | Status | Next step |
+|---|---|---|
+| | | |
 
 ---
-<sub>🤖 Generated with [Claude Code](https://claude.com/claude-code)</sub>
+<sub>All development is facilitated with generative AI tools. This is not Skanda Kaashyap. Please reach out to kaashmonee@candace.cloud with any questions or concerns!</sub>
