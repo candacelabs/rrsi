@@ -1,0 +1,14 @@
+[build-system]
+requires = ["maturin>=1.8,<2"]
+build-backend = "maturin"
+
+[project]
+name = "rrsi-mine"
+version = "0.1.0"
+description = "Python bindings for the RRSI Go task miner"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+
+[tool.maturin]
+features = ["python"]
+module-name = "rrsi_mine"

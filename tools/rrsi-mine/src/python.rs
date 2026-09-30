@@ -1,0 +1,71 @@
+// Copyright 2026 Candace Labs
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! `rrsi_mine`: Python bindings (pyo3) over the same library the CLI uses.
+//!
+//! ```text
+//! import rrsi_mine
+//! rrsi_mine.list_candidates("/path/to/repo", "2026-06-01") -> list[dict]
+//! rrsi_mine.export_tree(repo, sha, dest)
+//! rrsi_mine.apply_patch(tree, patch) -> str | None   (error text, or None)
+//! rrsi_mine.go_test(tree, module_root, packages, image=..., modcache=...,
+//!                   buildcache=..., timeout=600) -> (passed, log)
+//! ```
+
+use pyo3::exceptions::PyRuntimeError;
+use pyo3::prelude::*;
+use pyo3::types::PyModule;
+use std::path::Path;
+
+fn err(e: anyhow::Error) -> PyErr {
+    PyRuntimeError::new_err(format!("{e:#}"))
+}
+
+#[pyfunction]
+fn list_candidates(py: Python<'_>, repo: &str, since: &str) -> PyResult<PyObject> {
+    let cands = py.allow_threads(|| crate::candidates(Path::new(repo), since)).map_err(err)?;
+    let json = serde_json::to_string(&cands).map_err(|e| err(e.into()))?;
+    let loads = PyModule::import(py, "json")?.getattr("loads")?;
+    Ok(loads.call1((json,))?.unbind())
+}
+
+#[pyfunction]
+fn export_tree(py: Python<'_>, repo: &str, sha: &str, dest: &str) -> PyResult<()> {
+    py.allow_threads(|| crate::export_tree(Path::new(repo), sha, Path::new(dest))).map_err(err)
+}
+
+#[pyfunction]
+fn apply_patch(py: Python<'_>, tree: &str, patch: &str) -> PyResult<Option<String>> {
+    py.allow_threads(|| crate::apply_patch(Path::new(tree), patch)).map_err(err)
+}
+
+#[pyfunction]
+#[pyo3(signature = (tree, module_root, packages, image = "golang:1.26.5",
+                    modcache = "rrsi-gomodcache", buildcache = "rrsi-gobuildcache",
+                    timeout = 600))]
+#[allow(clippy::too_many_arguments)]
+fn go_test(py: Python<'_>, tree: &str, module_root: &str, packages: Vec<String>, image: &str,
+           modcache: &str, buildcache: &str, timeout: u64) -> PyResult<(bool, String)> {
+    let docker = crate::Docker { image, modcache, buildcache, test_timeout: timeout };
+    py.allow_threads(|| docker.go_test(Path::new(tree), module_root, &packages)).map_err(err)
+}
+
+#[pymodule]
+fn rrsi_mine(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_function(wrap_pyfunction!(list_candidates, m)?)?;
+    m.add_function(wrap_pyfunction!(export_tree, m)?)?;
+    m.add_function(wrap_pyfunction!(apply_patch, m)?)?;
+    m.add_function(wrap_pyfunction!(go_test, m)?)?;
+    Ok(())
+}
