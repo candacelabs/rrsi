@@ -2,10 +2,17 @@
 
 > ## Candace Labs fork — prototype status
 >
-> **Headline so far: we can turn a repository's own history into a verified,
-> fairness-checked exam for coding agents — and the checks already caught an
-> unfair final exam before any money was spent on a run.** RRSI has not yet
-> been run on that exam, so there is no "RRSI improved our agent" result yet.
+> **Before:** to learn whether a change to an AI coding agent actually helps
+> *on your own codebase*, you either trusted public benchmarks built from other
+> people's code, or wrote test tasks by hand and checked each one yourself.
+>
+> **Now:** one command turns your repository's git history into a verified
+> exam — 86 recent commits in 22 minutes on one machine, 70 of them proven
+> questions (the tests fail before the real fix and pass after it, offline) —
+> and it warns you when the final exam is not a fair test.
+>
+> Not shown yet: whether RRSI then improves an agent on that exam. That needs
+> the baseline and RRSI rounds, and will replace this headline.
 >
 > | What we measured | Result |
 > |---|---|
