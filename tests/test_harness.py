@@ -142,12 +142,12 @@ class HarnessMinerTest(unittest.TestCase):
 
     def test_prompts_are_redacted(self):
         eps = [episode(0, "s", "p", {"tool_error": 1},
-                       text="ssh user@example.invalid at 100.64.1.2 token=abc123 in /home/someone/x " + "a" * 40)]
+                       text="ssh user@example.invalid at 203.0.113.7 token=abc123 in /home/someone/x " + "a" * 40)]
         (self.out / "episodes.jsonl").write_text(json.dumps(eps[0]) + "\n")
         fake = FakeModel()
         self.run_mine(fake)
         sent = "\n".join(fake.prompts)
-        for leaked in ("example.invalid", "100.64.1.2", "abc123", "/home/someone", "a" * 40):
+        for leaked in ("example.invalid", "203.0.113.7", "abc123", "/home/someone", "a" * 40):
             self.assertNotIn(leaked, sent)
         self.assertIn("<email>", sent)
 
