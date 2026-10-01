@@ -27,18 +27,69 @@
 //! Go ([`go::Go`]) is one implementation and behaves exactly as the miner
 //! did before toolchains existed (tests/go_list_parity.rs pins it). The
 //! FAIL_TO_PASS rule ([`crate::decide`]) and the task layout are shared.
+//!
+//! A toolchain only validates: where candidates come from is a miner's
+//! business (git history: src/history.rs). The contract between them is a
+//! [`Changed`] set of files (for [`Toolchain::project_root`] and
+//! [`Toolchain::units`]) and then a [`Candidate`] (trees, patches, units).
+//!
+//! Adding a toolchain is one module file exporting a [`Registration`] and
+//! one name in the `registry!` list below; nothing else changes.
 
-use crate::{dir_of, git, Candidate, Outcome, MAX_SRC_CHURN, MAX_SRC_PACKAGES};
+use crate::{dir_of, git, Candidate, Outcome};
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::Command;
 
-pub mod bazel;
-pub mod cpp;
-pub mod go;
-pub mod python;
 pub mod settings;
+
+macro_rules! registry {
+    ($($toolchain:ident),* $(,)?) => {
+        $(pub mod $toolchain;)*
+        /// Every toolchain, in the order `--toolchain auto` tries them: a
+        /// commit is claimed by the first toolchain that makes it a candidate.
+        pub const REGISTRY: &[Registration] = &[$($toolchain::REGISTRATION),*];
+    };
+}
+
+registry! {
+    go,
+    python,
+    cpp,
+    bazel,
+}
+
+/// What a toolchain module tells the rest of the crate about itself.
+pub struct Registration {
+    /// The value of `--toolchain` and of a task's `toolchain` field.
+    pub name: &'static str,
+    /// The language in prose, for prompts ("Python").
+    pub language: &'static str,
+    /// The code-fence tag of its source ("python").
+    pub fence: &'static str,
+    /// The file rules without any container settings.
+    pub classify: fn(&str) -> FileKind,
+    /// The pinned image its containers run.
+    pub image: &'static str,
+    /// Its named volumes (caches), in the order `build` expects them.
+    pub volumes: &'static [&'static str],
+    /// The toolchain, from its resolved settings.
+    pub build: fn(Config) -> Box<dyn Toolchain>,
+}
+
+/// One toolchain's resolved settings: its sandbox, volumes and extra
+/// arguments (e.g. cmake configure flags).
+#[derive(Clone, Debug)]
+pub struct Config {
+    pub sandbox: Sandbox,
+    pub volumes: Vec<String>,
+    pub args: Vec<String>,
+}
+
+pub fn registration(name: &str) -> Option<&'static Registration> {
+    REGISTRY.iter().find(|r| r.name == name)
+}
 
 /// What a changed file is, for one toolchain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,14 +106,16 @@ pub enum FileKind {
 
 /// One build system the miner can validate tasks with.
 pub trait Toolchain: Sync {
-    /// `go`, `python`, `cpp` or `bazel`: the value of `--toolchain` and of a
-    /// task's `toolchain` field.
+    /// Its registered name (`go`, `python`, ...).
     fn name(&self) -> &'static str;
     /// Whether a repository-relative path marks a project root.
     fn is_root_marker(&self, path: &str) -> bool;
     fn classify_file(&self, path: &str) -> FileKind;
-    /// The candidate commits since `since`, newest first.
-    fn candidates(&self, repo: &Path, since: &str) -> Result<Vec<Candidate>>;
+    /// The project root the changed tests belong to, if exactly one.
+    fn project_root(&self, ch: &Changed) -> Option<String>;
+    /// The test units of the changed tests under `root`, relative to it.
+    /// `read` returns a file of the changed tree (e.g. a BUILD file).
+    fn units(&self, ch: &Changed, root: &str, read: &dyn Fn(&str) -> Result<String>) -> Result<Vec<String>>;
     /// The units to run, resolved on the commit tree after its prefetch
     /// (a CTest test name, a Bazel test label). An empty list means no test
     /// unit covers the changed tests.
@@ -87,30 +140,17 @@ pub trait Toolchain: Sync {
     }
 }
 
-/// Every toolchain, in the order `--toolchain auto` tries them: a commit is
-/// claimed by the first toolchain that makes it a candidate.
-pub const NAMES: [&str; 4] = ["go", "python", "cpp", "bazel"];
-
 /// The language a toolchain's tasks are written in, for prompts: (name in
 /// prose, code-fence tag). A task without a toolchain is Go.
 pub fn language(toolchain: Option<&str>) -> (&'static str, &'static str) {
-    match toolchain.unwrap_or("go") {
-        "python" => ("Python", "python"),
-        "cpp" => ("C++", "cpp"),
-        "bazel" => ("Bazel-built", ""),
-        _ => ("Go", "go"),
-    }
+    let r = registration(toolchain.unwrap_or("go")).unwrap_or(&go::REGISTRATION);
+    (r.language, r.fence)
 }
 
 /// How the named toolchain (absent: Go) classifies a path, without its
 /// container settings.
 pub fn classify_file(toolchain: Option<&str>, path: &str) -> FileKind {
-    match toolchain.unwrap_or("go") {
-        "python" => python::classify_file(path),
-        "cpp" => cpp::classify_file(path),
-        "bazel" => bazel::classify_file(path),
-        _ => go::classify_file(path),
-    }
+    (registration(toolchain.unwrap_or("go")).unwrap_or(&go::REGISTRATION).classify)(path)
 }
 
 /// The toolchains one command uses, looked up by a candidate's
@@ -129,40 +169,9 @@ impl Toolchains {
     pub fn for_candidate(&self, c: &Candidate) -> Result<&dyn Toolchain> {
         self.get(c.toolchain.as_deref())
     }
-
-    /// The toolchains `--toolchain` selects for `repo`: one by name, or for
-    /// `auto` every toolchain with a project root at HEAD, in [`NAMES`] order.
-    pub fn select(&self, repo: &Path, choice: &str) -> Result<Vec<&dyn Toolchain>> {
-        if choice != "auto" {
-            return Ok(vec![self.get(Some(choice))?]);
-        }
-        let mut out = Vec::new();
-        for n in NAMES {
-            let t = self.get(Some(n))?;
-            if !t.detect(repo, "HEAD")?.is_empty() {
-                out.push(t);
-            }
-        }
-        Ok(out)
-    }
-
-    /// The candidates of every selected toolchain, newest first per
-    /// toolchain; a commit two toolchains both claim goes to the first.
-    pub fn candidates(&self, repo: &Path, since: &str, choice: &str) -> Result<Vec<Candidate>> {
-        let mut seen = BTreeSet::new();
-        let mut out = Vec::new();
-        for t in self.select(repo, choice)? {
-            for c in t.candidates(repo, since)? {
-                if seen.insert(c.sha.clone()) {
-                    out.push(c);
-                }
-            }
-        }
-        Ok(out)
-    }
 }
 
-// ---- shared candidate scan for the non-Go toolchains ----
+// ---- paths ----
 
 /// Repository-relative paths of every file tracked at `rev`.
 pub fn tracked_files(repo: &Path, rev: &str) -> Result<Vec<String>> {
@@ -208,86 +217,14 @@ pub fn is_lockfile(name: &str) -> bool {
                    | "package-lock.json" | "pnpm-lock.yaml" | "yarn.lock")
 }
 
-/// One commit's changed files, split by kind, with the files tracked at it.
+/// One change's files, split by kind, with the files tracked after it:
+/// what a miner hands a toolchain to find the project and its test units.
 pub struct Changed {
-    pub sha: String,
     /// (churn, path) of the source files.
     pub src: Vec<(u64, String)>,
     pub tests: Vec<String>,
     /// Every file tracked at the commit (a deleted file is absent).
     pub tracked: BTreeSet<String>,
-}
-
-/// How one non-Go toolchain turns a commit's changes into a candidate.
-pub trait Mapper {
-    /// The project root the changed tests belong to, if exactly one.
-    fn root(&self, ch: &Changed) -> Option<String>;
-    /// The test units of the changed tests under `root`, relative to it.
-    fn units(&self, ch: &Changed, root: &str, repo: &Path) -> Result<Vec<String>>;
-}
-
-/// The candidates of a non-Go toolchain: commits since `since` that change
-/// source and tests of one project root (source elsewhere in the repository
-/// is not part of the fix), within the Go miner's size limits
-/// (at most MAX_SRC_CHURN changed source lines in at most MAX_SRC_PACKAGES
-/// directories), whose changed tests map to at least one test unit.
-pub fn scan_candidates(tc: &dyn Toolchain, mapper: &dyn Mapper, repo: &Path, since: &str)
-    -> Result<Vec<Candidate>> {
-    let since_arg = format!("--since={since}");
-    let log = git(repo, &["log", &since_arg, "--no-merges", "--format=%H"])?;
-    let mut out = Vec::new();
-    for sha in log.split_whitespace() {
-        let mut src: Vec<(u64, String)> = Vec::new();
-        let mut tests: Vec<String> = Vec::new();
-        for line in git(repo, &["show", "--numstat", "--format=", "--no-renames", sha])?.lines() {
-            let f: Vec<&str> = line.split('\t').collect();
-            if f.len() < 3 {
-                continue;
-            }
-            let churn = f[0].parse::<u64>().unwrap_or(0) + f[1].parse::<u64>().unwrap_or(0);
-            match tc.classify_file(f[2]) {
-                FileKind::Source => src.push((churn, f[2].to_string())),
-                FileKind::Test => tests.push(f[2].to_string()),
-                FileKind::Generated | FileKind::Other => {}
-            }
-        }
-        if src.is_empty() || tests.is_empty() {
-            continue;
-        }
-        let tracked: BTreeSet<String> = tracked_files(repo, sha)?.into_iter().collect();
-        let mut ch = Changed { sha: sha.to_string(), src, tests, tracked };
-        let Some(root) = mapper.root(&ch) else { continue };
-        // The task is the project's own change: like the Go miner ignoring
-        // non-Go files, files of other projects are neither fix nor tests
-        // (they stay in the commit tree only).
-        ch.src.retain(|(_, f)| under(&root, f));
-        ch.tests.retain(|f| under(&root, f));
-        if ch.src.is_empty() {
-            continue;
-        }
-        let churn: u64 = ch.src.iter().map(|(c, _)| c).sum();
-        let dirs: BTreeSet<String> = ch.src.iter().map(|(_, f)| dir_of(f)).collect();
-        if churn > MAX_SRC_CHURN || dirs.len() > MAX_SRC_PACKAGES {
-            continue;
-        }
-        let units = mapper.units(&ch, &root, repo)?;
-        if units.is_empty() {
-            continue;
-        }
-        out.push(Candidate {
-            sha: sha.to_string(),
-            parent: git(repo, &["rev-parse", &format!("{sha}^")])?.trim().to_string(),
-            subject: git(repo, &["log", "-1", "--format=%s", sha])?.trim().to_string(),
-            body: git(repo, &["log", "-1", "--format=%b", sha])?.trim().to_string(),
-            module_root: root,
-            packages: units,
-            src_files: ch.src.into_iter().map(|(_, f)| f).collect(),
-            test_files: ch.tests,
-            src_churn: churn,
-            toolchain: Some(tc.name().to_string()),
-        });
-    }
-    Ok(out)
 }
 
 /// The single project root of `files` (nearest ancestor holding a marker in
@@ -433,6 +370,25 @@ pub fn src_dir(root: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The plugin rule: a registration is self-sufficient (unique name, a
+    /// toolchain of that name from its own defaults, a language).
+    #[test]
+    fn every_registration_builds_its_own_toolchain() {
+        let names: BTreeSet<&str> = REGISTRY.iter().map(|r| r.name).collect();
+        assert_eq!(names.len(), REGISTRY.len(), "unique names");
+        for r in REGISTRY {
+            let sandbox = Sandbox { image: r.image.into(), cpus: "1".into(), memory: "1g".into(), timeout: 1,
+                                    prefetch_timeout: 1 };
+            let tc = (r.build)(Config { sandbox, volumes: r.volumes.iter().map(|v| v.to_string()).collect(),
+                                        args: vec![] });
+            assert_eq!(tc.name(), r.name);
+            assert!(!r.language.is_empty());
+            assert_eq!(language(Some(r.name)).0, r.language);
+            assert!(r.name == "go" || r.image.contains("@sha256:"), "{} is pinned by digest", r.name);
+        }
+        assert_eq!(language(None), ("Go", "go"), "a task without a toolchain is Go");
+    }
 
     #[test]
     fn paths_split_into_roots_and_names() {

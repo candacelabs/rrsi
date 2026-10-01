@@ -44,15 +44,13 @@ fn listing_toolchains() -> crate::Toolchains {
         #[command(flatten)]
         s: crate::toolchain::settings::Settings,
     }
-    let go = crate::toolchain::go::Go { image: "golang:1.26.5".into(), modcache: "rrsi-gomodcache".into(),
-                                        buildcache: "rrsi-gobuildcache".into(), test_timeout: 600 };
-    Defaults::parse_from(["rrsi_mine"]).s.toolchains(go)
+    Defaults::parse_from(["rrsi_mine"]).s.toolchains(600, vec![])
 }
 
 #[pyfunction]
 #[pyo3(signature = (repo, since, toolchain = "go"))]
 fn list_candidates(py: Python<'_>, repo: &str, since: &str, toolchain: &str) -> PyResult<PyObject> {
-    let cands = py.allow_threads(|| listing_toolchains().candidates(Path::new(repo), since, toolchain))
+    let cands = py.allow_threads(|| crate::history::candidates_for(&listing_toolchains(), Path::new(repo), since, toolchain))
         .map_err(err)?;
     let json = serde_json::to_string(&cands).map_err(|e| err(e.into()))?;
     let loads = PyModule::import(py, "json")?.getattr("loads")?;

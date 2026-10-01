@@ -24,7 +24,7 @@
 //! `FETCHCONTENT_FULLY_DISCONNECTED=ON`, builds only those executables and
 //! runs `ctest -R '^(name|...)$'`.
 
-use super::{in_dir_named, rel, sh_quote, Changed, FileKind, Mapper, Run, Sandbox, Toolchain};
+use super::{in_dir_named, rel, sh_quote, Changed, Config, FileKind, Registration, Run, Sandbox, Toolchain};
 use crate::{dir_of, relative_package, Candidate, Outcome};
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -75,20 +75,20 @@ pub fn is_root_marker(path: &str) -> bool {
     super::file_name(path) == "CMakeLists.txt"
 }
 
-struct CppMapper;
+pub const REGISTRATION: Registration = Registration {
+    name: "cpp", language: "C++", fence: "cpp", classify: classify_file,
+    image: "mcr.microsoft.com/devcontainers/cpp:1-ubuntu-24.04@sha256:\
+            d51703c4fcbe93cd889d38005847521d87cca4d304f33423430daf10a384a332",
+    volumes: &[],
+    build: |c: Config| Box::new(Cpp { sandbox: c.sandbox, cmake_args: c.args }),
+};
 
-impl Mapper for CppMapper {
-    fn root(&self, ch: &Changed) -> Option<String> {
-        super::single_root(&ch.tests, &ch.tracked, is_root_marker, true)
-    }
-
-    /// The changed test sources that still exist; resolved to CTest tests
-    /// on the configured commit tree ([`Toolchain::resolve_units`]).
-    fn units(&self, ch: &Changed, root: &str, _repo: &Path) -> Result<Vec<String>> {
-        Ok(ch.tests.iter().filter(|f| is_code(f) && ch.tracked.contains(*f)
-                && !matches!(super::extension(f), "h" | "hh" | "hpp" | "hxx" | "inl" | "ipp" | "tpp"))
-            .map(|f| relative_package(root, f)).collect())
-    }
+/// The changed test sources that still exist; resolved to CTest tests on
+/// the configured commit tree ([`Toolchain::resolve_units`]).
+fn test_sources(ch: &Changed, root: &str) -> Vec<String> {
+    ch.tests.iter().filter(|f| is_code(f) && ch.tracked.contains(*f)
+            && !matches!(super::extension(f), "h" | "hh" | "hpp" | "hxx" | "inl" | "ipp" | "tpp"))
+        .map(|f| relative_package(root, f)).collect()
 }
 
 /// The build directory of a tree: beside it, never inside the source.
@@ -317,8 +317,12 @@ impl Toolchain for Cpp {
         classify_file(path)
     }
 
-    fn candidates(&self, repo: &Path, since: &str) -> Result<Vec<Candidate>> {
-        super::scan_candidates(self, &CppMapper, repo, since)
+    fn project_root(&self, ch: &Changed) -> Option<String> {
+        super::single_root(&ch.tests, &ch.tracked, is_root_marker, true)
+    }
+
+    fn units(&self, ch: &Changed, root: &str, _read: &dyn Fn(&str) -> Result<String>) -> Result<Vec<String>> {
+        Ok(test_sources(ch, root))
     }
 
     fn resolve_units(&self, commit_tree: &Path, cand: &Candidate) -> Result<Vec<String>> {
@@ -386,11 +390,13 @@ mod tests {
     fn test_units_are_compilable_changed_test_sources() {
         let tracked: BTreeSet<String> = ["CMakeLists.txt", "test/CMakeLists.txt", "test/a-test.cc", "test/util.h",
                                          "src/a.cc"].map(String::from).into_iter().collect();
-        let ch = Changed { sha: "s".into(), src: vec![(2, "src/a.cc".into())],
+        let ch = Changed { src: vec![(2, "src/a.cc".into())],
                            tests: vec!["test/a-test.cc".into(), "test/util.h".into(), "test/CMakeLists.txt".into()],
                            tracked };
-        assert_eq!(CppMapper.root(&ch).as_deref(), Some(""), "the top-level project");
-        assert_eq!(CppMapper.units(&ch, "", Path::new(".")).unwrap(), ["./test/a-test.cc"]);
+        let cpp = Cpp { sandbox: Sandbox { image: String::new(), cpus: "1".into(), memory: "1g".into(),
+                                           timeout: 1, prefetch_timeout: 1 }, cmake_args: vec![] };
+        assert_eq!(cpp.project_root(&ch).as_deref(), Some(""), "the top-level project");
+        assert_eq!(test_sources(&ch, ""), ["./test/a-test.cc"]);
     }
 
     #[test]

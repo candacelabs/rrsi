@@ -22,7 +22,7 @@
 //! project itself; pytest is always added. The offline run is
 //! `python -m pytest <test files>` with that environment.
 
-use super::{in_dir_named, rel, sh_quote, Changed, FileKind, Mapper, Run, Sandbox, Toolchain};
+use super::{in_dir_named, rel, sh_quote, Changed, Config, FileKind, Registration, Run, Sandbox, Toolchain};
 use crate::{relative_package, Candidate, Outcome};
 use anyhow::Result;
 use std::collections::BTreeSet;
@@ -79,18 +79,18 @@ pub fn is_root_marker(path: &str) -> bool {
         || (n.starts_with("requirements") && n.ends_with(".txt"))
 }
 
-struct PyMapper;
+pub const REGISTRATION: Registration = Registration {
+    name: "python", language: "Python", fence: "python", classify: classify_file,
+    image: "ghcr.io/astral-sh/uv:python3.12-bookworm@sha256:\
+            85d4cb1afa769a7338e095b927bee941cf5ec92266c7424b3f6c0f2748567248",
+    volumes: &["rrsi-pydeps"],
+    build: |c: Config| Box::new(Python { deps: c.volumes[0].clone(), sandbox: c.sandbox }),
+};
 
-impl Mapper for PyMapper {
-    fn root(&self, ch: &Changed) -> Option<String> {
-        super::single_root(&ch.tests, &ch.tracked, is_root_marker, false)
-    }
-
-    /// The changed test modules that still exist at the commit.
-    fn units(&self, ch: &Changed, root: &str, _repo: &Path) -> Result<Vec<String>> {
-        Ok(ch.tests.iter().filter(|f| is_test_module(f) && ch.tracked.contains(*f))
-            .map(|f| relative_package(root, f)).collect())
-    }
+/// The changed test modules that still exist at the commit.
+fn test_units(ch: &Changed, root: &str) -> Vec<String> {
+    ch.tests.iter().filter(|f| is_test_module(f) && ch.tracked.contains(*f))
+        .map(|f| relative_package(root, f)).collect()
 }
 
 /// The shell that names the dependency environment of the project in the
@@ -286,8 +286,12 @@ impl Toolchain for Python {
         classify_file(path)
     }
 
-    fn candidates(&self, repo: &Path, since: &str) -> Result<Vec<Candidate>> {
-        super::scan_candidates(self, &PyMapper, repo, since)
+    fn project_root(&self, ch: &Changed) -> Option<String> {
+        super::single_root(&ch.tests, &ch.tracked, is_root_marker, false)
+    }
+
+    fn units(&self, ch: &Changed, root: &str, _read: &dyn Fn(&str) -> Result<String>) -> Result<Vec<String>> {
+        Ok(test_units(ch, root))
     }
 
     fn prefetch_label(&self) -> &'static str {
@@ -354,11 +358,13 @@ mod tests {
     fn test_units_are_the_changed_test_modules_that_still_exist() {
         let tracked: BTreeSet<String> = ["proj/pyproject.toml", "proj/pkg/a.py", "proj/tests/test_a.py",
                                          "proj/tests/helpers.py"].map(String::from).into_iter().collect();
-        let ch = Changed { sha: "s".into(), src: vec![(3, "proj/pkg/a.py".into())],
+        let ch = Changed { src: vec![(3, "proj/pkg/a.py".into())],
                            tests: vec!["proj/tests/test_a.py".into(), "proj/tests/helpers.py".into(),
                                        "proj/tests/test_gone.py".into()], tracked };
-        assert_eq!(PyMapper.root(&ch).as_deref(), Some("proj"));
-        assert_eq!(PyMapper.units(&ch, "proj", Path::new(".")).unwrap(), ["./tests/test_a.py"]);
+        let py = (REGISTRATION.build)(Config { sandbox: Sandbox { image: String::new(), cpus: "1".into(),
+            memory: "1g".into(), timeout: 1, prefetch_timeout: 1 }, volumes: vec!["v".into()], args: vec![] });
+        assert_eq!(py.project_root(&ch).as_deref(), Some("proj"));
+        assert_eq!(test_units(&ch, "proj"), ["./tests/test_a.py"]);
     }
 
     #[test]

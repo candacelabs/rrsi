@@ -16,15 +16,14 @@
 //! they were in main.rs). Images are pinned by digest; every test run is
 //! capped like the Go run.
 
-use super::{bazel::Bazel, cpp::Cpp, go::Go, python::Python, Sandbox, Toolchains};
+use super::{Config, Sandbox, Toolchains, REGISTRY};
+use clap::builder::PossibleValuesParser;
 use clap::Args;
 
-pub const PYTHON_IMAGE: &str = "ghcr.io/astral-sh/uv:python3.12-bookworm@sha256:\
-85d4cb1afa769a7338e095b927bee941cf5ec92266c7424b3f6c0f2748567248";
-pub const CPP_IMAGE: &str = "mcr.microsoft.com/devcontainers/cpp:1-ubuntu-24.04@sha256:\
-d51703c4fcbe93cd889d38005847521d87cca4d304f33423430daf10a384a332";
-pub const BAZEL_IMAGE: &str = "gcr.io/bazel-public/bazel:9.2.0@sha256:\
-e59bd66f8daf69f02dbfc18dbd72f0ecfe7926bbda95a5c9eb62433d83b8bd02";
+/// `auto` and every registered toolchain name.
+fn choices() -> PossibleValuesParser {
+    PossibleValuesParser::new(std::iter::once("auto").chain(REGISTRY.iter().map(|r| r.name)))
+}
 
 /// `--toolchain` of `list` and `mine`.
 #[derive(Args, Clone, Debug)]
@@ -33,28 +32,27 @@ pub struct ToolchainChoice {
     /// python (pytest), cpp (CMake + CTest), bazel (`bazel test`), or auto
     /// (every toolchain with a project root at HEAD; a commit goes to the
     /// first that claims it, in that order).
-    #[arg(long, default_value = "go", value_parser = ["auto", "go", "python", "cpp", "bazel"])]
+    #[arg(long, default_value = "go", value_parser = choices())]
     pub toolchain: String,
 }
 
-/// Container settings of the Python, C++ and Bazel toolchains.
+/// Container settings of every toolchain but Go (whose flags predate
+/// toolchains). Each registered toolchain's pinned image and volumes are
+/// the defaults; `NAME=VALUE` flags or `RRSI_<NAME>_IMAGE` override them.
 #[derive(Args, Clone, Debug)]
 pub struct Settings {
-    #[arg(long, env = "RRSI_PYTHON_IMAGE", default_value = PYTHON_IMAGE)]
-    pub python_image: String,
-    /// Named volume of the Python virtualenvs and uv's caches.
-    #[arg(long, env = "RRSI_PYTHON_DEPS", default_value = "rrsi-pydeps")]
-    pub python_deps: String,
-    #[arg(long, env = "RRSI_CPP_IMAGE", default_value = CPP_IMAGE)]
-    pub cpp_image: String,
-    /// Extra cmake configure arguments (repeatable), e.g. -DFOO_TESTS=ON.
-    #[arg(long = "cmake-arg", allow_hyphen_values = true)]
-    pub cmake_args: Vec<String>,
-    #[arg(long, env = "RRSI_BAZEL_IMAGE", default_value = BAZEL_IMAGE)]
-    pub bazel_image: String,
-    /// Named volume of Bazel's output base, repository and disk caches.
-    #[arg(long, env = "RRSI_BAZEL_CACHE", default_value = "rrsi-bazelcache")]
-    pub bazel_cache: String,
+    /// A toolchain's image, e.g. `python=python:3.12@sha256:...` (repeatable;
+    /// also RRSI_<NAME>_IMAGE).
+    #[arg(long = "toolchain-image", value_name = "NAME=IMAGE")]
+    pub images: Vec<String>,
+    /// A toolchain's named volumes, comma-separated in its order, e.g.
+    /// `bazel=my-bazel-cache` (repeatable).
+    #[arg(long = "toolchain-volume", value_name = "NAME=VOLUME[,VOLUME]")]
+    pub volumes: Vec<String>,
+    /// An extra argument for a toolchain, e.g. `cpp=-DFOO_TESTS=ON` for
+    /// cmake configure (repeatable).
+    #[arg(long = "toolchain-arg", value_name = "NAME=ARG", allow_hyphen_values = true)]
+    pub args: Vec<String>,
     /// CPUs of one test container.
     #[arg(long, env = "RRSI_CPUS", default_value = "4")]
     pub cpus: String,
@@ -66,22 +64,69 @@ pub struct Settings {
     pub prefetch_timeout: u64,
 }
 
+/// The values of `NAME=VALUE` entries for `name`, in order.
+fn values<'a>(entries: &'a [String], name: &str) -> impl Iterator<Item = &'a str> + 'a {
+    let prefix = format!("{name}=");
+    entries.iter().filter_map(move |e| e.strip_prefix(prefix.as_str()))
+}
+
 impl Settings {
-    fn sandbox(&self, image: &str, timeout: u64) -> Sandbox {
-        Sandbox { image: image.to_string(), cpus: self.cpus.clone(), memory: self.memory.clone(), timeout,
-                  prefetch_timeout: self.prefetch_timeout }
+    /// The resolved settings of toolchain `name` with test timeout
+    /// `timeout`.
+    pub fn config(&self, name: &str, timeout: u64) -> Option<Config> {
+        let r = super::registration(name)?;
+        let env = std::env::var(format!("RRSI_{}_IMAGE", name.to_uppercase())).ok();
+        let image = values(&self.images, name).last().map(str::to_string).or(env)
+            .unwrap_or_else(|| r.image.to_string());
+        let volumes = values(&self.volumes, name).last()
+            .map(|v| v.split(',').map(str::to_string).collect())
+            .unwrap_or_else(|| r.volumes.iter().map(|v| v.to_string()).collect());
+        Some(Config { sandbox: Sandbox { image, cpus: self.cpus.clone(), memory: self.memory.clone(), timeout,
+                                         prefetch_timeout: self.prefetch_timeout },
+                      volumes, args: values(&self.args, name).map(str::to_string).collect() })
     }
 
-    /// Every toolchain: `go` as configured, the others from these settings
-    /// with the same test timeout.
-    pub fn toolchains(&self, go: Go) -> Toolchains {
-        let t = go.test_timeout;
-        Toolchains { all: vec![
-            Box::new(go),
-            Box::new(Python { sandbox: self.sandbox(&self.python_image, t), deps: self.python_deps.clone() }),
-            Box::new(Cpp { sandbox: self.sandbox(&self.cpp_image, t), cmake_args: self.cmake_args.clone() }),
-            Box::new(Bazel { sandbox: self.sandbox(&self.bazel_image, t), cache: self.bazel_cache.clone(),
-                             lock: Default::default() }),
-        ] }
+    /// Every registered toolchain; `fixed` overrides a toolchain's whole
+    /// config (Go's own flags).
+    pub fn toolchains(&self, timeout: u64, fixed: Vec<(&str, Config)>) -> Toolchains {
+        let mut fixed = fixed;
+        Toolchains { all: REGISTRY.iter().map(|r| {
+            let config = match fixed.iter().position(|(n, _)| *n == r.name) {
+                Some(i) => fixed.remove(i).1,
+                None => self.config(r.name, timeout).expect("registered"),
+            };
+            (r.build)(config)
+        }).collect() }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Cli {
+        #[command(flatten)]
+        s: Settings,
+        #[command(flatten)]
+        t: ToolchainChoice,
+    }
+
+    #[test]
+    fn registered_defaults_and_name_value_overrides() {
+        let cli = Cli::parse_from(["x", "--toolchain", "cpp", "--toolchain-arg", "cpp=-DFMT_TEST=ON",
+                                   "--toolchain-volume", "bazel=a,b", "--toolchain-image", "python=py:1"]);
+        assert_eq!(cli.t.toolchain, "cpp");
+        let cpp = cli.s.config("cpp", 600).unwrap();
+        assert_eq!(cpp.args, ["-DFMT_TEST=ON"]);
+        assert!(cpp.sandbox.image.starts_with("mcr.microsoft.com/devcontainers/cpp:") && cpp.sandbox.image.contains("@sha256:"));
+        assert_eq!(cli.s.config("bazel", 1).unwrap().volumes, ["a", "b"]);
+        assert_eq!(cli.s.config("python", 1).unwrap().sandbox.image, "py:1");
+        assert_eq!(cli.s.config("python", 1).unwrap().volumes, ["rrsi-pydeps"]);
+        assert!(cli.s.config("nope", 1).is_none());
+        assert!(Cli::try_parse_from(["x", "--toolchain", "rust"]).is_err(), "only registered names");
+        let names: Vec<&str> = cli.s.toolchains(600, vec![]).all.iter().map(|t| t.name()).collect();
+        assert_eq!(names, ["go", "python", "cpp", "bazel"]);
     }
 }

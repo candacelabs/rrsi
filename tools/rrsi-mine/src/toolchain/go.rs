@@ -17,7 +17,7 @@
 //! miner's original behaviour, unchanged: the trait methods delegate to
 //! [`crate::candidates`] and [`crate::Docker`].
 
-use super::{FileKind, Toolchain};
+use super::{Changed, Config, FileKind, Registration, Toolchain};
 use crate::{Candidate, Docker, Outcome, GENERATED};
 use anyhow::Result;
 use std::path::Path;
@@ -36,6 +36,13 @@ impl Go {
                  test_timeout: self.test_timeout }
     }
 }
+
+pub const REGISTRATION: Registration = Registration {
+    name: "go", language: "Go", fence: "go", classify: classify_file, image: "golang:1.26.5",
+    volumes: &["rrsi-gomodcache", "rrsi-gobuildcache"],
+    build: |c: Config| Box::new(Go { image: c.sandbox.image, modcache: c.volumes[0].clone(),
+                                     buildcache: c.volumes[1].clone(), test_timeout: c.sandbox.timeout }),
+};
 
 /// The Go miner's file rules: `_test.go` is a test, GENERATED patterns are
 /// generated, other `.go` files are source.
@@ -64,8 +71,17 @@ impl Toolchain for Go {
         classify_file(path)
     }
 
-    fn candidates(&self, repo: &Path, since: &str) -> Result<Vec<Candidate>> {
-        crate::candidates(repo, since)
+    /// The module (nearest go.mod) of the changed tests. (Go's history
+    /// mining keeps its own rules: [`crate::candidates`].)
+    fn project_root(&self, ch: &Changed) -> Option<String> {
+        super::single_root(&ch.tests, &ch.tracked, |f| self.is_root_marker(f), false)
+    }
+
+    /// The packages that change both source and tests, as `./dir`.
+    fn units(&self, ch: &Changed, root: &str, _read: &dyn Fn(&str) -> Result<String>) -> Result<Vec<String>> {
+        let src: std::collections::BTreeSet<String> = ch.src.iter().map(|(_, f)| crate::dir_of(f)).collect();
+        let tests: std::collections::BTreeSet<String> = ch.tests.iter().map(|f| crate::dir_of(f)).collect();
+        Ok(src.intersection(&tests).map(|d| crate::relative_package(root, d)).collect())
     }
 
     fn prefetch_label(&self) -> &'static str {

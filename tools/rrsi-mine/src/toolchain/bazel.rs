@@ -30,8 +30,8 @@
 //! leaves the offline run nothing to download. One output base admits one
 //! Bazel server at a time, so Bazel containers run one after another.
 
-use super::{sh_quote, Changed, FileKind, Mapper, Run, Sandbox, Toolchain};
-use crate::{dir_of, git, Candidate, Outcome, GENERATED};
+use super::{sh_quote, Changed, Config, FileKind, Registration, Run, Sandbox, Toolchain};
+use crate::{dir_of, Candidate, Outcome, GENERATED};
 use anyhow::Result;
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -107,31 +107,35 @@ pub fn label(root: &str, pkg: &str, file: Option<&str>) -> String {
     }
 }
 
-struct BazelMapper;
+pub const REGISTRATION: Registration = Registration {
+    name: "bazel", language: "Bazel-built", fence: "", classify: classify_file,
+    image: "gcr.io/bazel-public/bazel:9.2.0@sha256:\
+            e59bd66f8daf69f02dbfc18dbd72f0ecfe7926bbda95a5c9eb62433d83b8bd02",
+    volumes: &["rrsi-bazelcache"],
+    build: |c: Config| Box::new(Bazel { cache: c.volumes[0].clone(), sandbox: c.sandbox, lock: Mutex::new(()) }),
+};
 
-impl Mapper for BazelMapper {
-    fn root(&self, ch: &Changed) -> Option<String> {
-        let tests: Vec<String> = ch.tests.iter().filter(|f| !BUILD_FILES.contains(&super::file_name(f)))
-            .cloned().collect();
-        super::single_root(if tests.is_empty() { &ch.tests } else { &tests }, &ch.tracked, is_root_marker, false)
-    }
+fn test_root(ch: &Changed) -> Option<String> {
+    let tests: Vec<String> = ch.tests.iter().filter(|f| !BUILD_FILES.contains(&super::file_name(f)))
+        .cloned().collect();
+    super::single_root(if tests.is_empty() { &ch.tests } else { &tests }, &ch.tracked, is_root_marker, false)
+}
 
-    /// `//pkg:all` for every package whose BUILD file declares a test rule
-    /// and names (or globs) one of the changed test files.
-    fn units(&self, ch: &Changed, root: &str, repo: &Path) -> Result<Vec<String>> {
-        let mut out = BTreeSet::new();
-        for f in ch.tests.iter().filter(|f| !BUILD_FILES.contains(&super::file_name(f)) && ch.tracked.contains(*f)) {
-            let Some(pkg) = package_of(f, root, &ch.tracked) else { continue };
-            let build = BUILD_FILES.iter().map(|b| join(&pkg, b)).find(|b| ch.tracked.contains(b));
-            let Some(build) = build else { continue };
-            let text = git(repo, &["show", &format!("{}:{build}", ch.sha)])?;
-            let named = text.contains(&format!("\"{}\"", super::rel(&pkg, f))) || text.contains("glob(");
-            if named && text.contains("_test(") {
-                out.insert(label(root, &pkg, None));
-            }
+/// `//pkg:all` for every package whose BUILD file declares a test rule and
+/// names (or globs) one of the changed test files.
+fn test_packages(ch: &Changed, root: &str, read: &dyn Fn(&str) -> Result<String>) -> Result<Vec<String>> {
+    let mut out = BTreeSet::new();
+    for f in ch.tests.iter().filter(|f| !BUILD_FILES.contains(&super::file_name(f)) && ch.tracked.contains(*f)) {
+        let Some(pkg) = package_of(f, root, &ch.tracked) else { continue };
+        let build = BUILD_FILES.iter().map(|b| join(&pkg, b)).find(|b| ch.tracked.contains(b));
+        let Some(build) = build else { continue };
+        let text = read(&build)?;
+        let named = text.contains(&format!("\"{}\"", super::rel(&pkg, f))) || text.contains("glob(");
+        if named && text.contains("_test(") {
+            out.insert(label(root, &pkg, None));
         }
-        Ok(out.into_iter().collect())
     }
+    Ok(out.into_iter().collect())
 }
 
 const STARTUP: &str = "--output_user_root=/cache/out";
@@ -249,8 +253,12 @@ impl Toolchain for Bazel {
         classify_file(path)
     }
 
-    fn candidates(&self, repo: &Path, since: &str) -> Result<Vec<Candidate>> {
-        super::scan_candidates(self, &BazelMapper, repo, since)
+    fn project_root(&self, ch: &Changed) -> Option<String> {
+        test_root(ch)
+    }
+
+    fn units(&self, ch: &Changed, root: &str, read: &dyn Fn(&str) -> Result<String>) -> Result<Vec<String>> {
+        test_packages(ch, root, read)
     }
 
     /// Narrow each `//pkg:all` to the non-manual test targets depending on
@@ -363,13 +371,13 @@ mod tests {
         write("pkg/b/b_test.go", "package b\n");
         run(&["add", "-A"]);
         run(&["commit", "-qm", "base"]);
-        let sha = git(r, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
         let tracked = super::super::tracked_files(r, "HEAD").unwrap().into_iter().collect();
-        let ch = Changed { sha, src: vec![(1, "pkg/a/a.go".into())],
+        let ch = Changed { src: vec![(1, "pkg/a/a.go".into())],
                            tests: vec!["pkg/a/a_test.go".into(), "pkg/b/b_test.go".into(), "pkg/a/BUILD.bazel".into()],
                            tracked };
-        assert_eq!(BazelMapper.root(&ch).as_deref(), Some(""));
-        assert_eq!(BazelMapper.units(&ch, "", r).unwrap(), ["//pkg/a:all"], "pkg/b declares no test rule");
+        let read = |p: &str| crate::git(r, &["show", &format!("HEAD:{p}")]);
+        assert_eq!(test_root(&ch).as_deref(), Some(""));
+        assert_eq!(test_packages(&ch, "", &read).unwrap(), ["//pkg/a:all"], "pkg/b declares no test rule");
     }
 
     #[test]

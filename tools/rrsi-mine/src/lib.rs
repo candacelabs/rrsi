@@ -491,6 +491,7 @@ pub fn mine(repo: &Path, out: &Path, cands: Vec<Candidate>, jobs: usize, tcs: &T
 }
 
 pub mod fairness;
+pub mod history;
 pub mod llm;
 pub mod scan;
 pub mod toolchain;

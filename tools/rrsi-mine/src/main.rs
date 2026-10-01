@@ -18,8 +18,9 @@ use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use rrsi_mine::fairness::{self as fair, Task};
 use rrsi_mine::llm::{Copilot, ProcessRunner};
-use rrsi_mine::mine;
-use rrsi_mine::toolchain::{go::Go, settings::{Settings, ToolchainChoice}, Toolchains};
+use rrsi_mine::toolchain::settings::{Settings, ToolchainChoice};
+use rrsi_mine::toolchain::Toolchains;
+use rrsi_mine::{history, mine};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -154,8 +155,10 @@ struct GoArgs {
 
 impl GoArgs {
     fn toolchains(&self) -> Toolchains {
-        self.others.toolchains(Go { image: self.image.clone(), modcache: self.modcache.clone(),
-                                    buildcache: self.buildcache.clone(), test_timeout: self.test_timeout })
+        let mut go = self.others.config("go", self.test_timeout).expect("go is registered");
+        go.sandbox.image = self.image.clone();
+        go.volumes = vec![self.modcache.clone(), self.buildcache.clone()];
+        self.others.toolchains(self.test_timeout, vec![("go", go)])
     }
 }
 
@@ -199,14 +202,14 @@ fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::List { repo, since, tc, go } => {
             let tcs = go.toolchains();
-            for c in tcs.candidates(&repo, &since, &tc.toolchain)? {
+            for c in history::candidates_for(&tcs, &repo, &since, &tc.toolchain)? {
                 println!("{}", serde_json::to_string(&c)?);
             }
         }
         Cmd::Mine { repo, out, since, jobs, limit, tc, go } => {
             let repo = repo.canonicalize().context("--repo")?;
             let tcs = go.toolchains();
-            let mut cands = tcs.candidates(&repo, &since, &tc.toolchain)?;
+            let mut cands = history::candidates_for(&tcs, &repo, &since, &tc.toolchain)?;
             if limit > 0 {
                 cands.truncate(limit);
             }
