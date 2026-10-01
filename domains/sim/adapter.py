@@ -21,8 +21,8 @@ runtime, and its simulator workers (README.md says more).
 Tasks are scenarios, not commits: 24 practice (evolve) and 8 held-out
 straight-path scenarios (data/scenarios.py). The agent (frozen policy +
 evolvable harness) proposes one controller per scenario; CSF checks it with its
-bounded controller compiler, executes it on the selected engine (fake, CPU
-HighwayEnv or CARLA 0.9.16; bench/engines.py) and RRSI grades the episode from
+bounded controller compiler, executes it on the selected backend (fake, CPU
+HighwayEnv or CARLA 0.9.16; bench/backends.py) and RRSI grades the episode from
 CSF's events.jsonl by four oracles (bench/oracles.py). Reward = oracle pass
 fraction. Cost = policy tokens + `sim_second_tokens` x simulated seconds.
 
@@ -60,7 +60,7 @@ class SimDomain(Domain):
               "proposer": briefs.PROPOSER, "critic": briefs.CRITIC}
     critic_patterns = [
         (r"scenarios\.py|oracles\.py|\bBY_ID\b|\bHELDOUT|\bEVOLVE\b|\bPRACTICE\b|verdict\.json|"
-         r"events\.jsonl|manifest\.json|run_tasks|engines\.py|data/",
+         r"events\.jsonl|manifest\.json|run_tasks|backends\.py|data/",
          "reaches for scenario data, the oracles, the grader or evidence"),
         # Seeds are ordinary integers (a gain of -300 is not seed 300), so only
         # the scenario-name form and an explicit seed comparison are flagged;
@@ -98,12 +98,12 @@ class SimDomain(Domain):
 
     # ---- Evaluate ----------------------------------------------------------
     def _cmd(self, root: Path, runs_dir: Path, job: str, ids: list[str], k: int,
-             engine: str | None = None) -> list[str]:
+             backend: str | None = None) -> list[str]:
         cmd = [sys.executable, str(root / "domains" / "sim" / "bench" / "run_tasks.py"),
                "--runs", str(runs_dir), "--job", job, "--ids", ",".join(ids), "--n", str(k)]
-        return cmd + (["--engine", engine] if engine else [])
+        return cmd + (["--backend", backend] if backend else [])
 
-    def run(self, root, runs_dir, job, ids, k, log_prefix="", engine=None):
+    def run(self, root, runs_dir, job, ids, k, log_prefix="", backend=None):
         root, runs_dir = Path(root), Path(runs_dir)
         log = runs_dir / "logs" / f"{log_prefix or job}.log"
         log.parent.mkdir(parents=True, exist_ok=True)
@@ -111,7 +111,7 @@ class SimDomain(Domain):
         # a verdict; one retry pass fills them before scoring counts them missing.
         for _ in range(2):
             with open(log, "a") as lf:
-                r = subprocess.run(self._cmd(root, runs_dir, job, ids, k, engine),
+                r = subprocess.run(self._cmd(root, runs_dir, job, ids, k, backend),
                                    cwd=str(root / "domains" / "sim"), stdout=lf, stderr=subprocess.STDOUT)
             if r.returncode != 0:
                 print(f"[sim] WARNING run rc={r.returncode} (see {log})", flush=True)
@@ -167,7 +167,7 @@ class SimDomain(Domain):
                      "crash_rate": crash / n, "infra_rate": self._infra(runs_dir, job, ids, k) / n,
                      "sim_seconds": round(sim_s, 1),
                      "mean_policy_tokens": (sum(toks_only) / len(toks_only)) if toks_only else None,
-                     "engine": os.environ.get("RRSI_SIM_ENGINE", "fake")}
+                     "backend": os.environ.get("RRSI_SIM_BACKEND", "fake")}
 
     def guards(self, incumbent, candidate) -> list[str]:
         out = []
@@ -198,7 +198,7 @@ class SimDomain(Domain):
 
     # ---- gates -------------------------------------------------------------
     def smoke(self, root, runs_dir, job, ids):
-        """Liveness on the surrogate engine: compile, interface, two real trials."""
+        """Liveness on the surrogate backend: compile, interface, two real trials."""
         root, runs_dir = Path(root), Path(runs_dir)
         sim = root / "domains" / "sim"
         comp = subprocess.run([sys.executable, "-m", "compileall", "-q",
@@ -217,8 +217,8 @@ class SimDomain(Domain):
             return False, {"stage": "ctor", "err": (ctor.stderr or ctor.stdout)[-1500:]}
         shutil.rmtree(runs_dir / "jobs" / job, ignore_errors=True)
         sys.path.insert(0, str(HERE / "bench"))
-        import engines
-        self.run(root, runs_dir, job, ids, 1, job, engine=engines.surrogate_name())
+        import backends
+        self.run(root, runs_dir, job, ids, 1, job, backend=backends.surrogate_name())
         per, extra = self.score(runs_dir, job, ids, 1)
         missing = sum(tr.missing for tr in per.values())
         ok = missing == 0 and extra["crash_rate"] == 0.0

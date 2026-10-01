@@ -15,7 +15,7 @@
 
     python3 -m pytest -q tests/test_sim_domain.py
 
-Runs on the dependency-free fake engine. With RRSI_SIM_CSF_RUNTIME set to the
+Runs on the dependency-free fake backend. With RRSI_SIM_CSF_RUNTIME set to the
 CSF Go runtime, the fake controller semantics are also compared with it.
 """
 
@@ -37,14 +37,14 @@ from rrsi.domain import load_domain as _load_domain  # noqa: E402
 # Every domain names its modules harness/render/briefs/run_tasks; one pytest
 # process holds several domains, so this file imports the sim modules and then
 # returns sys.path and sys.modules to their previous state.
-_SHARED = ("harness", "render", "briefs", "run_tasks", "engines", "oracles", "fake_engine", "scenarios")
+_SHARED = ("harness", "render", "briefs", "run_tasks", "backends", "oracles", "fake_backend", "scenarios")
 _SAVED = {n: m for n, m in sys.modules.items() if n.split(".")[0] in _SHARED}
 for _name in _SAVED:
     del sys.modules[_name]
 _PATH, _MODULES = list(sys.path), set(sys.modules)
 sys.path[:0] = [str(SIM), str(SIM / "bench"), str(SIM / "data")]
-import engines                      # noqa: E402
-import fake_engine                  # noqa: E402
+import backends                      # noqa: E402
+import fake_backend                  # noqa: E402
 import oracles                      # noqa: E402
 import run_tasks                    # noqa: E402
 import scenarios                    # noqa: E402
@@ -100,7 +100,7 @@ def test_splits_are_disjoint_and_in_the_straight_profile():
 
 
 def test_admission_mirror_accepts_the_baseline_and_rejects_malformed_trees():
-    fake_engine.check(controller())
+    fake_backend.check(controller())
     bad = [
         {"schema_version": 1, "name": "x", "steering": {"opcode": "OPCODE_ADD", "arguments": []},
          "acceleration": {"opcode": "OPCODE_CONSTANT"}},
@@ -113,21 +113,21 @@ def test_admission_mirror_accepts_the_baseline_and_rejects_malformed_trees():
         {**controller(), "schema_version": 2},
     ]
     for c in bad:
-        with pytest.raises(fake_engine.Rejected):
-            fake_engine.check(c)
-    assert engines.check(bad[0])[0] is False
+        with pytest.raises(fake_backend.Rejected):
+            fake_backend.check(c)
+    assert backends.check(bad[0])[0] is False
 
 
 def test_scale_truncates_toward_zero_like_the_go_runtime():
     c = {"schema_version": 1, "name": "s", "steering": scale(0, 1), "acceleration": scale(0, -1)}
-    assert fake_engine.act(c, [1999, 0, 0, 0]) == (1, -1)
-    assert fake_engine.act(c, [-1999, 0, 0, 0]) == (-1, 1)
+    assert fake_backend.act(c, [1999, 0, 0, 0]) == (1, -1)
+    assert fake_backend.act(c, [-1999, 0, 0, 0]) == (-1, 1)
 
 
 def grade_one(c, task=None, tmp=None):
     task = task or scenarios.PRACTICE[0]
     job = {"id": "e", "scenario": task["scenario"], "goal_metres": task["goal_metres"], "controller": c}
-    fake_engine.run_batch([job], tmp, "r")
+    fake_backend.run_batch([job], tmp, "r")
     return oracles.grade(tmp / "e", task)
 
 
@@ -147,7 +147,7 @@ def test_events_are_csf_research_event_rows(tmp_path):
     grade_one(controller(), tmp=tmp_path)
     rows = [json.loads(line) for line in (tmp_path / "e" / "events.jsonl").read_text().splitlines()]
     measured = {r["measurement"]["metric"] for r in rows if "measurement" in r}
-    assert measured == set(fake_engine.METRICS)
+    assert measured == set(fake_backend.METRICS)
     assert all(r["schema_version"] == 1 and r["recorded_at"].endswith("Z") for r in rows)
     manifest = json.loads((tmp_path / "e" / "manifest.json").read_text())
     assert manifest["format"] == "csf-scenario-episode-v1" and manifest["status"] == "completed"
@@ -176,17 +176,17 @@ def submit(c):
     return json.dumps({"action": "submit", "controller": c})
 
 
-def run_job(tmp_path, ids, k, policy, engine, job="j"):
+def run_job(tmp_path, ids, k, policy, backend, job="j"):
     runs = tmp_path / "runs"
-    surrogate = engines.FakeEngine()
+    surrogate = backends.FakeBackend()
     work = [(t, i) for t in ids for i in range(k)]
     for t, i in work:
         run_tasks.propose(runs, job, t, i, policy, surrogate)
     pending = [(t, i) for t, i in work
                if (runs / "jobs" / job / t / f"t{i}" / "controller.json").is_file()
                and not (runs / "jobs" / job / t / f"t{i}" / "episode" / "manifest.json").is_file()]
-    run_tasks.execute(runs, job, pending, engine)
-    return runs, [run_tasks.grade_trial(runs / "jobs" / job / t / f"t{i}", scenarios.BY_ID[t], engine.name)
+    run_tasks.execute(runs, job, pending, backend)
+    return runs, [run_tasks.grade_trial(runs / "jobs" / job / t / f"t{i}", scenarios.BY_ID[t], backend.name)
                   for t, i in work]
 
 
@@ -194,7 +194,7 @@ def test_runner_end_to_end_with_receipts_and_scoring(tmp_path):
     ids = scenarios.EVOLVE[:3]
     skipped = scenarios.brief(scenarios.BY_ID[ids[0]])
     policy = ScriptedPolicy(lambda brief: submit(controller()) if skipped not in brief else "no json")
-    runs, grades = run_job(tmp_path, ids, 2, policy, engines.FakeEngine())
+    runs, grades = run_job(tmp_path, ids, 2, policy, backends.FakeBackend())
     assert len(grades) == 6 and "infra" not in grades
     tdir = runs / "jobs" / "j" / ids[1] / "t0"
     receipt = json.loads((tdir / "receipt.json").read_text())
@@ -215,7 +215,7 @@ def test_runner_end_to_end_with_receipts_and_scoring(tmp_path):
 def test_simulator_crash_is_infra_never_a_controller_failure(tmp_path):
     ids = scenarios.EVOLVE[:2]
     policy = ScriptedPolicy(lambda brief: submit(controller()))
-    crash = engines.FakeEngine(crash_ids=[f"{ids[0]}--t0"])
+    crash = backends.FakeBackend(crash_ids=[f"{ids[0]}--t0"])
     runs, grades = run_job(tmp_path, ids, 1, policy, crash)
     assert grades == ["infra", "infra"]
     assert not (runs / "jobs" / "j" / ids[0] / "t0" / "verdict.json").exists()
@@ -226,16 +226,16 @@ def test_simulator_crash_is_infra_never_a_controller_failure(tmp_path):
     # The retry re-executes the kept proposals without asking the policy again.
     calls = []
     retry = ScriptedPolicy(lambda brief: calls.append(brief) or submit(controller()))
-    runs, grades = run_job(tmp_path, ids, 1, retry, engines.FakeEngine())
+    runs, grades = run_job(tmp_path, ids, 1, retry, backends.FakeBackend())
     assert not calls and set(grades) <= {"graded", "passed"}
 
 
 def test_policy_endpoint_failure_is_infra_and_retried(tmp_path):
     ids = scenarios.EVOLVE[:1]
     down = ScriptedPolicy(lambda brief: ScriptedPolicy.PolicyError("endpoint down"))
-    runs, grades = run_job(tmp_path, ids, 1, down, engines.FakeEngine())
+    runs, grades = run_job(tmp_path, ids, 1, down, backends.FakeBackend())
     assert grades == ["infra"]
-    runs, grades = run_job(tmp_path, ids, 1, ScriptedPolicy(lambda b: submit(controller())), engines.FakeEngine())
+    runs, grades = run_job(tmp_path, ids, 1, ScriptedPolicy(lambda b: submit(controller())), backends.FakeBackend())
     assert grades[0] in ("graded", "passed")
 
 
@@ -250,11 +250,11 @@ def test_starting_harness_checks_then_submits():
     assert any("rejected: schema_version" in m["content"] for m in out["messages"])
 
 
-def test_rollout_tool_uses_the_surrogate_not_the_graded_engine(tmp_path):
+def test_rollout_tool_uses_the_surrogate_not_the_graded_backend(tmp_path):
     task = scenarios.PRACTICE[2]
-    check, rollout = run_tasks.make_tools(task, engines.FakeEngine(), tmp_path)
+    check, rollout = run_tasks.make_tools(task, backends.FakeBackend(), tmp_path)
     verdict = rollout(controller())
-    assert verdict["engine"] == "fake" and set(verdict["oracles"]) == set(oracles.ORACLES)
+    assert verdict["backend"] == "fake" and set(verdict["oracles"]) == set(oracles.ORACLES)
     assert check({"name": "x"})["ok"] is False
 
 
@@ -282,28 +282,28 @@ def test_fake_semantics_match_the_csf_go_runtime():
         out = subprocess.run([os.environ["RRSI_SIM_CSF_RUNTIME"]], text=True, capture_output=True,
                              input=json.dumps(request) + "\n")
         action = json.loads(out.stdout)["action"]
-        assert (int(action.get("steering", 0)), int(action.get("acceleration", 0))) == fake_engine.act(c, features)
-    assert engines._go_compile({"schema_version": 1, "name": "r"})[0] is False
+        assert (int(action.get("steering", 0)), int(action.get("acceleration", 0))) == fake_backend.act(c, features)
+    assert backends._go_compile({"schema_version": 1, "name": "r"})[0] is False
 
 
-def test_any_command_honouring_the_contract_is_an_engine(tmp_path):
-    script = tmp_path / "engine.py"
+def test_any_command_honouring_the_contract_is_an_backend(tmp_path):
+    script = tmp_path / "backend.py"
     script.write_text(
         "import argparse, json, sys\n"
         f"sys.path.insert(0, {str(SIM / 'bench')!r})\n"
-        "import fake_engine\n"
+        "import fake_backend\n"
         "ap = argparse.ArgumentParser(); ap.add_argument('--jobs'); ap.add_argument('--output')\n"
         "ap.add_argument('--run-id'); a = ap.parse_args()\n"
         "from pathlib import Path\n"
         "jobs = json.loads(Path(a.jobs).read_text())['episodes']\n"
-        "fake_engine.run_batch(jobs, Path(a.output), a.run_id)\n")
+        "fake_backend.run_batch(jobs, Path(a.output), a.run_id)\n")
     task = scenarios.PRACTICE[0]
     jobs = [{"id": "e", "scenario": task["scenario"], "goal_metres": task["goal_metres"],
              "controller": controller()}]
-    facts = engines.CommandEngine("command", [sys.executable, str(script)]).execute(jobs, tmp_path / "out", "r1")
+    facts = backends.CommandBackend("command", [sys.executable, str(script)]).execute(jobs, tmp_path / "out", "r1")
     assert facts["exit"] == 0 and oracles.grade(tmp_path / "out" / "e", task)["status"] == "ok"
-    with pytest.raises(engines.InfraError, match="without batch.json"):
-        engines.CommandEngine("broken", [sys.executable, "-c", "raise SystemExit(3)"]).execute(
+    with pytest.raises(backends.InfraError, match="without batch.json"):
+        backends.CommandBackend("broken", [sys.executable, "-c", "raise SystemExit(3)"]).execute(
             jobs, tmp_path / "out2", "r2")
-    with pytest.raises(engines.InfraError):
-        engines.CommandEngine("none", [])
+    with pytest.raises(backends.InfraError):
+        backends.CommandBackend("none", [])

@@ -103,9 +103,9 @@ def render_full(rec: dict, detail: bool = False) -> str:
         lines.append(f"[harness error] {_clip(meta['error'], 2000)}")
     lines += ["=== SUBMITTED CONTROLLER ===",
               _clip(json.dumps(rec.get("controller")) if rec.get("controller") is not None else "(none)", 3000),
-              "=== SIMULATION (graded engine) ===",
+              "=== SIMULATION (graded backend) ===",
               f"FAILURE CLASS: {failure_class(rec)}",
-              f"engine={v.get('engine')} reward={v.get('reward')} oracles={json.dumps(v.get('oracles'))}",
+              f"backend={v.get('backend')} reward={v.get('reward')} oracles={json.dumps(v.get('oracles'))}",
               f"termination={v.get('termination')} steps={v.get('steps')} sim_seconds={v.get('simulation_seconds')} "
               f"max|lateral|={v.get('max_abs_lateral_metres')} max_speed={v.get('max_speed_mps')} "
               f"final_lateral={v.get('final_lateral_metres')} final_heading={v.get('final_heading_error_radians')}",

@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""The fake engine: a dependency-free stand-in for a CSF scenario batch.
+"""The fake backend: a dependency-free stand-in for a CSF scenario batch.
 
 (CSF: Candace Labs' Go framework for AI-agent systems, developer preview; see
 domains/sim/README.md.)

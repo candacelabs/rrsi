@@ -24,7 +24,7 @@ Trial i of task X is RUNS/jobs/JOB/X/t<i>/:
   receipt.json           hashes binding scenario, controller and evidence
 
 Three resume-safe phases: propose (the policy writes a controller), execute
-(one engine batch for every proposed trial still without evidence) and grade.
+(one backend batch for every proposed trial still without evidence) and grade.
 A policy-endpoint failure or a simulator crash leaves the trial without a
 verdict, recorded as infra, and the next invocation retries it.
 """
@@ -49,7 +49,7 @@ sys.path.insert(0, str(SIM))
 sys.path.insert(0, str(SIM / "bench"))
 sys.path.insert(0, str(SIM / "data"))
 
-import engines                       # noqa: E402
+import backends                       # noqa: E402
 import oracles                       # noqa: E402
 from harness.agent import run_agent  # noqa: E402
 from scenarios import BY_ID, brief   # noqa: E402
@@ -86,11 +86,11 @@ def read(path: Path):
         return None
 
 
-def make_tools(task: dict, surrogate: engines.Engine, scratch: Path):
+def make_tools(task: dict, surrogate: backends.Backend, scratch: Path):
     counter = {"n": 0}
 
     def check(controller) -> dict:
-        ok, error = engines.check(controller)
+        ok, error = backends.check(controller)
         return {"ok": ok, "error": error}
 
     def rollout(controller) -> dict:
@@ -101,10 +101,10 @@ def make_tools(task: dict, surrogate: engines.Engine, scratch: Path):
                "controller": controller}
         try:
             surrogate.execute([job], out, f"rollout-{counter['n']}")
-        except engines.InfraError as error:
+        except backends.InfraError as error:
             return {"error": f"surrogate unavailable: {error}"}
         verdict = oracles.grade(out / "rollout", task)
-        verdict["engine"] = surrogate.name
+        verdict["backend"] = surrogate.name
         return verdict
 
     return check, rollout
@@ -126,7 +126,7 @@ def propose(runs: Path, job: str, tid: str, i: int, policy, surrogate) -> str:
         msgs = out.get("messages") or []
         meta.update(status="ok", tokens=int(out.get("tokens") or 0),
                     steps=sum(1 for m in msgs if m.get("role") == "assistant"))
-    except (policy.PolicyError, engines.InfraError) as e:
+    except (policy.PolicyError, backends.InfraError) as e:
         meta.update(status="infra", error=str(e)[:500], seconds=round(time.time() - t0, 1))
         write(tdir / "meta.json", meta)
         return "infra"
@@ -146,8 +146,8 @@ def _batch_id(job: str) -> str:
     return f"{stem[:40]}-{time.strftime('%Y%m%dt%H%M%S')}-{os.getpid() % 10000}"
 
 
-def execute(runs: Path, job: str, pending: list[tuple[str, int]], engine: engines.Engine) -> dict:
-    """One engine batch for every pending trial; moves each episode into its trial."""
+def execute(runs: Path, job: str, pending: list[tuple[str, int]], backend: backends.Backend) -> dict:
+    """One backend batch for every pending trial; moves each episode into its trial."""
     if not pending:
         return {}
     jobs = []
@@ -159,9 +159,9 @@ def execute(runs: Path, job: str, pending: list[tuple[str, int]], engine: engine
     out = runs / "jobs" / job / "_batches" / batch_id
     out.parent.mkdir(parents=True, exist_ok=True)
     try:
-        facts = engine.execute(jobs, out, batch_id)
-    except (engines.InfraError, OSError) as error:
-        facts = {"engine": engine.name, "error": str(error)}
+        facts = backend.execute(jobs, out, batch_id)
+    except (backends.InfraError, OSError) as error:
+        facts = {"backend": backend.name, "error": str(error)}
     facts["batch"] = batch_id
     facts["episodes"] = len(jobs)
     write(out.parent / f"{batch_id}.json", facts)
@@ -177,7 +177,7 @@ def execute(runs: Path, job: str, pending: list[tuple[str, int]], engine: engine
     return facts
 
 
-def grade_trial(tdir: Path, task: dict, engine_name: str) -> str:
+def grade_trial(tdir: Path, task: dict, backend_name: str) -> str:
     meta = read(tdir / "meta.json") or {}
     if (tdir / "verdict.json").is_file():
         return "kept"
@@ -190,11 +190,11 @@ def grade_trial(tdir: Path, task: dict, engine_name: str) -> str:
         verdict = oracles.grade(tdir / "episode", task)
         if verdict["status"] == "infra":
             return "infra"
-    verdict["engine"] = engine_name
+    verdict["backend"] = backend_name
     write(tdir / "verdict.json", verdict)
     episode = tdir / "episode"
     write(tdir / "receipt.json", {
-        "format": "rrsi-sim-receipt-v1", "task": task["id"], "engine": engine_name,
+        "format": "rrsi-sim-receipt-v1", "task": task["id"], "backend": backend_name,
         "batch": meta.get("batch", ""), "scenario_sha256": sha256_json(task["scenario"]),
         "goal_metres": task["goal_metres"],
         "controller_sha256": sha256_file(tdir / "controller.json"),
@@ -211,12 +211,12 @@ def main() -> int:
     ap.add_argument("--job", required=True)
     ap.add_argument("--ids", required=True)
     ap.add_argument("--n", type=int, required=True)
-    ap.add_argument("--engine", default=None, help="override RRSI_SIM_ENGINE (smoke uses the surrogate)")
+    ap.add_argument("--backend", default=None, help="override RRSI_SIM_BACKEND (smoke uses the surrogate)")
     a = ap.parse_args()
     runs = Path(a.runs)
     work = [(t, i) for t in a.ids.split(",") if t for i in range(a.n)]
-    engine = engines.get(a.engine)
-    surrogate = engines.get(engines.surrogate_name())
+    backend = backends.get(a.backend)
+    surrogate = backends.get(backends.surrogate_name())
     policy = _load_policy()
     with ThreadPoolExecutor(max_workers=CONCURRENCY) as ex:
         proposed = list(ex.map(lambda w: propose(runs, a.job, *w, policy, surrogate), work))
@@ -225,10 +225,10 @@ def main() -> int:
                and (read(runs / "jobs" / a.job / t / f"t{i}" / "meta.json") or {}).get("status") == "ok"
                and not (runs / "jobs" / a.job / t / f"t{i}" / "verdict.json").is_file()
                and not (runs / "jobs" / a.job / t / f"t{i}" / "episode" / "manifest.json").is_file()]
-    facts = execute(runs, a.job, pending, engine)
-    graded = [grade_trial(runs / "jobs" / a.job / t / f"t{i}", BY_ID[t], engine.name) for t, i in work]
+    facts = execute(runs, a.job, pending, backend)
+    graded = [grade_trial(runs / "jobs" / a.job / t / f"t{i}", BY_ID[t], backend.name) for t, i in work]
     counts = {k: graded.count(k) for k in sorted(set(graded))}
-    print(f"[sim] job={a.job} engine={engine.name} proposals={ {k: proposed.count(k) for k in sorted(set(proposed))} } "
+    print(f"[sim] job={a.job} backend={backend.name} proposals={ {k: proposed.count(k) for k in sorted(set(proposed))} } "
           f"executed={len(pending)} grades={counts} batch={facts.get('batch', '-')} "
           f"vram={facts.get('vram', {}).get('peak_mib', '-')}", flush=True)
     return 0

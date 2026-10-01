@@ -11,9 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""The engine interface: submit episodes (scenario + controller), get results.
+"""The backend interface: submit episodes (scenario + controller), get results.
 
-The domain never talks to a simulator directly. An engine takes a batch of
+The domain never talks to a simulator directly. A backend takes a batch of
 episodes, each {"id", "scenario", "goal_metres", "controller"} (the scenario
 and controller as generated protobuf JSON of CSF, Candace Labs' Go framework
 for AI-agent systems, in developer preview; see domains/sim/README.md), and
@@ -28,13 +28,13 @@ writes one result directory per episode id into `out`, plus `batch.json`:
   trace.jsonl    one row per physics step (observation, action, state)
 
 `rejected` means the controller failed admission (a controller result);
-`infra` means the engine failed (never a controller result). Anything that
-honours this contract can be an engine: CSF's scenario worker today, a
+`infra` means the backend failed (never a controller result). Anything that
+honours this contract can be a backend: CSF's scenario worker today, a
 ROS-side controller or a direct simulator container later, with no change to
-the domain. RRSI_SIM_ENGINE selects one:
+the domain. RRSI_SIM_BACKEND selects one:
 
-  fake     bench/fake_engine.py, in process, no dependencies (tests and CI)
-  command  any executable: RRSI_SIM_ENGINE_COMMAND is its argv, and the engine
+  fake     bench/fake_backend.py, in process, no dependencies (tests and CI)
+  command  any executable: RRSI_SIM_BACKEND_COMMAND is its argv, and the backend
            appends `--jobs FILE --output DIR --run-id ID`
   cpu      a `command` preset: CSF's scenario worker on the CPU HighwayEnv
            plant of CSF's training harness with the Go runtime (needs
@@ -61,9 +61,9 @@ import threading
 import time
 from pathlib import Path
 
-import fake_engine
+import fake_backend
 
-ENGINE = os.environ.get("RRSI_SIM_ENGINE", "fake").strip().lower()
+BACKEND = os.environ.get("RRSI_SIM_BACKEND", "fake").strip().lower()
 CSF_ROOT = os.environ.get("RRSI_SIM_CSF_ROOT", "")
 CSF_RUNTIME = os.environ.get("RRSI_SIM_CSF_RUNTIME", "")
 CANDACE = os.environ.get("RRSI_SIM_CANDACE", "candace")
@@ -71,7 +71,7 @@ BATCH_TIMEOUT = float(os.environ.get("RRSI_SIM_BATCH_TIMEOUT", "3600"))
 
 
 class InfraError(RuntimeError):
-    """The engine could not run (not evidence about any controller)."""
+    """The backend could not run (not evidence about any controller)."""
 
 
 def check(controller) -> tuple[bool, str]:
@@ -79,8 +79,8 @@ def check(controller) -> tuple[bool, str]:
     if CSF_RUNTIME:
         return _go_compile(controller)
     try:
-        fake_engine.check(controller)
-    except fake_engine.Rejected as error:
+        fake_backend.check(controller)
+    except fake_backend.Rejected as error:
         return False, str(error)
     return True, ""
 
@@ -101,17 +101,17 @@ def _go_compile(controller) -> tuple[bool, str]:
     return True, ""
 
 
-class Engine:
+class Backend:
     """Submit a batch of episodes; results land in `out` (see the module doc)."""
 
     name = "base"
 
     def execute(self, jobs: list[dict], out: Path, run_id: str) -> dict:
-        """Run the batch into `out`; returns engine facts (describe, VRAM, wall seconds)."""
+        """Run the batch into `out`; returns backend facts (describe, VRAM, wall seconds)."""
         raise NotImplementedError
 
 
-class FakeEngine(Engine):
+class FakeBackend(Backend):
     name = "fake"
 
     def __init__(self, crash_ids=()):
@@ -119,8 +119,8 @@ class FakeEngine(Engine):
 
     def execute(self, jobs, out, run_id):
         started = time.monotonic()
-        fake_engine.run_batch(jobs, out, run_id, self.crash_ids)
-        return {"engine": self.name, "simulator": fake_engine.describe(),
+        fake_backend.run_batch(jobs, out, run_id, self.crash_ids)
+        return {"backend": self.name, "simulator": fake_backend.describe(),
                 "wall_seconds": time.monotonic() - started}
 
 
@@ -130,12 +130,12 @@ def write_jobs(jobs: list[dict], path: Path) -> None:
          "controller": j.get("controller")} for j in jobs]}, indent=1))
 
 
-class CommandEngine(Engine):
+class CommandBackend(Backend):
     """Any executable honouring the contract: argv + --jobs/--output/--run-id."""
 
     def __init__(self, name: str, argv: list[str], env: dict | None = None, sample_vram: bool = False):
         if not argv:
-            raise InfraError(f"engine {name!r} has no command")
+            raise InfraError(f"backend {name!r} has no command")
         self.name, self.argv, self.env, self.sample_vram = name, list(argv), env, sample_vram
 
     def execute(self, jobs, out, run_id):
@@ -152,19 +152,19 @@ class CommandEngine(Engine):
                 sampler.__enter__()
             result = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=BATCH_TIMEOUT + 120)
         except (OSError, subprocess.TimeoutExpired) as error:
-            raise InfraError(f"engine {self.name} did not run: {error}") from error
+            raise InfraError(f"backend {self.name} did not run: {error}") from error
         finally:
             if sampler:
                 sampler.__exit__()
-        facts = {"engine": self.name, "exit": result.returncode, "wall_seconds": time.monotonic() - started,
+        facts = {"backend": self.name, "exit": result.returncode, "wall_seconds": time.monotonic() - started,
                  "log_tail": (result.stdout + result.stderr)[-1500:]}
         out.mkdir(parents=True, exist_ok=True)
-        (out / "engine.log").write_text(result.stdout + result.stderr)
+        (out / "backend.log").write_text(result.stdout + result.stderr)
         if sampler:
             facts["vram"] = sampler.summary()
             (out / "vram.json").write_text(json.dumps({"samples": sampler.samples, **facts["vram"]}))
         if not (out / "batch.json").is_file():
-            raise InfraError(f"engine {self.name} exited {result.returncode} without batch.json: {facts['log_tail']}")
+            raise InfraError(f"backend {self.name} exited {result.returncode} without batch.json: {facts['log_tail']}")
         facts["simulator"] = json.loads((out / "batch.json").read_text()).get("simulator")
         return facts
 
@@ -204,44 +204,44 @@ class VramSampler:
                 "total_mib": self.samples[0][2]}
 
 
-def cpu_engine() -> CommandEngine:
+def cpu_backend() -> CommandBackend:
     if not CSF_ROOT or not CSF_RUNTIME:
-        raise InfraError("cpu engine needs RRSI_SIM_CSF_ROOT and RRSI_SIM_CSF_RUNTIME")
+        raise InfraError("cpu backend needs RRSI_SIM_CSF_ROOT and RRSI_SIM_CSF_RUNTIME")
     root = Path(CSF_ROOT)
     # The worker imports the training runtime client and the generated
     # protobuf contract from PYTHONPATH, as it does inside the CARLA image.
     env = {"PYTHONPATH": os.pathsep.join([str(root / "examples" / "training"),
                                           str(root / "tools" / "codegen" / "generated" / "python")])}
-    return CommandEngine("cpu", ["uv", "run", "--quiet", "--project", str(root / "examples" / "training"),
+    return CommandBackend("cpu", ["uv", "run", "--quiet", "--project", str(root / "examples" / "training"),
                                  "--locked", "python", str(root / "examples" / "simulators" / "scenario_worker.py"),
                                  "--plant", "highway", "--runtime", CSF_RUNTIME], env)
 
 
-def carla_engine() -> CommandEngine:
+def carla_backend() -> CommandBackend:
     if shutil.which(CANDACE) is None and not Path(CANDACE).is_file():
         raise InfraError(f"candace CLI not found ({CANDACE}); set RRSI_SIM_CANDACE")
-    return CommandEngine("carla", [CANDACE, "csf", "simulator", "run", "carla",
+    return CommandBackend("carla", [CANDACE, "csf", "simulator", "run", "carla",
                                    "--max-wall-seconds", str(int(BATCH_TIMEOUT))], sample_vram=True)
 
 
-def get(name: str | None = None) -> Engine:
-    name = (name or ENGINE).strip().lower()
+def get(name: str | None = None) -> Backend:
+    name = (name or BACKEND).strip().lower()
     if name == "fake":
-        return FakeEngine()
+        return FakeBackend()
     if name == "command":
-        return CommandEngine("command", shlex.split(os.environ.get("RRSI_SIM_ENGINE_COMMAND", "")))
+        return CommandBackend("command", shlex.split(os.environ.get("RRSI_SIM_BACKEND_COMMAND", "")))
     if name == "cpu":
-        return cpu_engine()
+        return cpu_backend()
     if name == "carla":
-        return carla_engine()
-    raise SystemExit(f"unknown RRSI_SIM_ENGINE {name!r}; expected fake, command, cpu or carla")
+        return carla_backend()
+    raise SystemExit(f"unknown RRSI_SIM_BACKEND {name!r}; expected fake, command, cpu or carla")
 
 
 def surrogate_name() -> str:
-    """The cheaper engine behind the agent's rollout tool; never the graded one."""
+    """The cheaper backend behind the agent's rollout tool; never the graded one."""
     explicit = os.environ.get("RRSI_SIM_SURROGATE", "").strip().lower()
     if explicit:
         return explicit
-    if ENGINE == "carla" and CSF_ROOT and CSF_RUNTIME:
+    if BACKEND == "carla" and CSF_ROOT and CSF_RUNTIME:
         return "cpu"
     return "fake"
