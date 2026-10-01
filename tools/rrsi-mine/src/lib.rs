@@ -40,6 +40,10 @@
 //! rrsi-mine fairness --tasks DIR --repo PATH [--jobs 2] [--only SHA12] [--force]
 //! rrsi-mine flake|api|describe|probe|specificity|gate --tasks DIR ...
 //! ```
+//!
+//! Miners are plugins (src/miner.rs, src/miners/): this git-history miner is
+//! registered as `git-history`, and `traces` (src/miners/traces.rs) mines
+//! agent struggles from Claude Code session transcripts.
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -468,6 +472,9 @@ pub fn mine(repo: &Path, out: &Path, cands: Vec<Candidate>, jobs: usize, docker:
 pub mod fairness;
 pub mod llm;
 pub mod scan;
+pub mod miner;
+pub mod miners;
+pub mod transcript;
 
 #[cfg(feature = "python")]
 mod python;

@@ -68,6 +68,7 @@
 > | `toy` domain | 30 small Python tasks with hidden tests, a deliberately weak harness, a network-less container sandbox — the cheapest full RRSI loop | [`domains/toy/`](domains/toy/README.md) |
 > | `rrsi-mine` | Rust: mine commits → validate FAIL_TO_PASS in sealed `golang` containers → fairness stages → `exam.jsonl`; pyo3 bindings (`import rrsi_mine`) for the Python side | [`tools/rrsi-mine/`](tools/rrsi-mine) |
 > | `rrsi-report` | Rust: one self-contained HTML report — plain-language "start here", funnel, why tasks were dropped, timeline, practice-set vs final-exam split with health checks and interpretation, task browser with example cards (the reference fix stays a collapsed spoiler) | [`tools/rrsi-mine/src/bin/rrsi-report.rs`](tools/rrsi-mine/src/bin/rrsi-report.rs) |
+> | Harness miner | Rust `rrsi-mine traces` (a plugin of the miner registry, `rrsi-mine miners`) finds where the agent struggled in Claude Code session transcripts; `python -m rrsi harness mine` clusters recurring struggles into harness tasks and a private report | [`tools/rrsi-mine/src/miners/traces.rs`](tools/rrsi-mine/src/miners/traces.rs), [`rrsi/harness/`](rrsi/harness/mine.py) |
 >
 > **How it works, in one example.** A commit "suppress unsafe notification
 > retries" added a test: *a delivery error that says it is not retryable must be
@@ -100,6 +101,130 @@
 > spread across subsystems), then the `house_go` domain: baseline → noise band
 > → RRSI rounds → final exam. The headline above will be replaced by that
 > result.
+>
+> **Harness miner: learn from the sessions themselves.** Where an exam asks
+> "can the agent fix this bug?", the harness miner asks "where did the agent
+> struggle while we actually worked with it, and what harness change would have
+> prevented it?" It reads Claude Code transcripts (`~/.claude/projects`,
+> including subagent transcripts) in two stages:
+>
+> 1. `rrsi-mine traces` (Rust, no LLM) parses every transcript and runs nine
+>    named, unit-tested detectors: `tool_error`, `retry` (the same call again
+>    after it failed), `hook_timeout`, `permission_denial`, `user_interrupt`,
+>    `user_correction` (a short pushback such as "no", "why", "again" or
+>    shouting right after an agent action), `reask` (the user asks nearly the
+>    same thing again after an answer), `silence` (the harness told the agent
+>    the user has not heard from it) and `test_failure` (go test, cargo,
+>    pytest, bazel, GitHub Actions). Hits close together become one *episode*
+>    with a bounded, truncated context window. Unchanged transcripts are
+>    skipped by mtime + content hash, so re-runs take seconds.
+> 2. `python -m rrsi harness mine` runs stage 1, then has a model (default:
+>    `claude-opus-5-5` through the Claude Agent SDK on the logged-in Claude
+>    Code, no API key; `--backend copilot|codex` use those logged-in CLIs)
+>    label each episode with a recurring-struggle pattern, merge patterns into
+>    clusters and write one task per top cluster: title, pattern, evidence
+>    (episode ids and counts), root-cause hypothesis, proposed harness fix
+>    (CLAUDE.md rule, skill, house-lint gate rule, memory, tool/CLI fix or
+>    doc), acceptance check and priority, plus RRSI-style exam candidates where
+>    a before/after is mechanically checkable. Every count is computed from
+>    the episode records, never by the model.
+>
+> ```bash
+> python -m rrsi harness mine                  # ~/.claude/projects -> ~/rrsi-private/harness
+> python -m rrsi harness mine --since 2026-09-01 --backend copilot
+> tools/rrsi-mine/target/release/rrsi-mine traces --out DIR   # stage 1 only
+> ```
+>
+> Output: `DIR/episodes.jsonl`, `DIR/tasks/<id>.json` + `index.json`,
+> `DIR/exam_candidates.jsonl`, `DIR/REPORT.md` (the top recurring struggles
+> with episode, session and project counts and the proposed fix).
+>
+> **Handoffs: when should agents have talked to each other?** A second
+> transcript miner, `handoffs`, looks at several concurrent sessions at once.
+> In one transcript it finds the operator relaying between sessions ("tell the
+> other session..."), messages that arrived from other sessions or a
+> coordinator (scored: did the receiver act, did it reply?), retractions and
+> rename churn in those messages, outgoing message calls, merge/rebase
+> conflicts, writes refused because a file belongs to another worktree,
+> "already done by..." discoveries, waiting on another session's work,
+> re-running a status check instead of asking, ownership questions and
+> claim/release comments. Across transcripts it finds two sessions editing
+> the same repository file (worktrees folded together) or branch at the same
+> time, and near-identical issue or PR titles from two sessions.
+> `python -m rrsi harness mine --miner handoffs` turns the recurring patterns
+> into tasks of the same shape, each with a trigger rule: "when
+> <detectable condition>, message <owner, and how the owner is resolved> with
+> <payload>", ready to become a harness rule or an ownership-state hook.
+>
+> ```bash
+> python -m rrsi harness mine --miner handoffs   # -> ~/rrsi-private/harness/handoffs
+> tools/rrsi-mine/target/release/rrsi-mine handoffs --out DIR   # deterministic stage only
+> ```
+>
+> **Privacy rules.** Transcripts hold private source, hostnames, addresses and
+> personal text. Both stages refuse to write inside any git work tree; keep
+> the output (default `~/rrsi-private/harness`) out of every repository. Text
+> sent to a model is redacted first (e-mail and IP addresses, token-like
+> strings, long hex, home paths) and truncated; the SDK backend runs with no
+> tools, no settings and no session persistence, so the miner's own calls
+> never become transcripts it mines. This repository holds only the code and
+> synthetic test fixtures: no transcript text, episode or finding is ever
+> committed here.
+>
+> **Miners are plugins; write your own.** `rrsi-mine` runs any registered
+> miner: `rrsi-mine miners` lists them (name, inputs, the records each
+> writes) and `rrsi-mine <name> --key value ...` runs one. Three ship today:
+> `git-history` (the FAIL_TO_PASS task miner above), `traces` (the
+> struggle miner) and `handoffs` (cross-session coordination). A miner is one file in
+> [`tools/rrsi-mine/src/miners/`](tools/rrsi-mine/src/miners/mod.rs)
+> implementing the [`Miner`](tools/rrsi-mine/src/miner.rs) trait plus one
+> registration line; deleting both removes it. Arguments arrive as a plain
+> JSON object (the CLI turns `--key value` into `{"key": value}`) and the
+> summary goes back as JSON, so any front end can drive a miner without
+> linking against it. The privacy rule is enforced for every miner before
+> it runs: an `out` inside a git work tree is refused.
+>
+> ```rust
+> // tools/rrsi-mine/src/miners/todo_comments.rs
+> use crate::miner::{parse_args, Miner};
+> use serde_json::{json, Value};
+>
+> pub struct TodoComments;
+>
+> #[derive(serde::Deserialize)]
+> #[serde(deny_unknown_fields)]
+> struct Args { repo: std::path::PathBuf, out: std::path::PathBuf }
+>
+> impl Miner for TodoComments {
+>     fn name(&self) -> &'static str { "todo-comments" }
+>     fn about(&self) -> &'static str { "one record per TODO comment in a repository" }
+>     fn inputs(&self) -> &'static [(&'static str, &'static str)] {
+>         &[("repo", "the repository"), ("out", "output directory")]
+>     }
+>     fn records(&self) -> &'static [(&'static str, &'static str)] {
+>         &[("todos.jsonl", "one TODO: file, line, text")]
+>     }
+>     fn run(&self, args: Value) -> anyhow::Result<Value> {
+>         let a: Args = parse_args(self.name(), args)?;
+>         let grep = crate::git(&a.repo, &["grep", "-n", "TODO"]).unwrap_or_default();
+>         std::fs::create_dir_all(&a.out)?;
+>         let mut n = 0;
+>         let mut text = String::new();
+>         for line in grep.lines() {
+>             let mut p = line.splitn(3, ':');
+>             let (file, no, body) = (p.next(), p.next(), p.next());
+>             text += &json!({"file": file, "line": no, "text": body}).to_string();
+>             text.push('\n');
+>             n += 1;
+>         }
+>         std::fs::write(a.out.join("todos.jsonl"), text)?;
+>         Ok(json!({"todos": n}))
+>     }
+> }
+> ```
+>
+> Then add `todo_comments => TodoComments,` to the `register!` list in
+> `src/miners/mod.rs` and run `rrsi-mine todo-comments --repo PATH --out DIR`.
 
 Check out our [paper](https://arxiv.org/abs/2609.24972) and [project page](https://regularized-rsi.com/) for more details.
 
