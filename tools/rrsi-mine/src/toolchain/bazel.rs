@@ -301,6 +301,13 @@ impl Toolchain for Bazel {
         format!("bazel test {}", units.join(" "))
     }
 
+    /// One output base serves both trees, and external repositories whose
+    /// inputs differ between them (e.g. a lockfile) are refetched on every
+    /// switch, which the offline run cannot do.
+    fn prefetch_before_each_run(&self) -> bool {
+        true
+    }
+
     fn prefetch(&self, tree: &Path, cand: &Candidate) -> Result<(bool, String)> {
         super::own_volume(&self.sandbox.image, &self.cache, tree)?;
         let (code, log) = self.exec(self.run(tree, cand, true, prefetch_script(&cand.packages)))?;

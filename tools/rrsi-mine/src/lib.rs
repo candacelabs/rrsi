@@ -389,10 +389,19 @@ pub fn validate(repo: &Path, out: &Path, cand: &Candidate, tc: &dyn Toolchain) -
                 rec.cand.packages = units;
             }
             let cand = &rec.cand.clone();
+            let refetch = |name: &str, tree: &Path| -> Result<()> {
+                if tc.prefetch_before_each_run() {
+                    println!("[mine]   {short} {name}: {} (again, right before the run)", tc.prefetch_label());
+                    tc.prefetch(tree, cand)?;
+                }
+                Ok(())
+            };
+            refetch("parent", &parent)?;
             println!("[mine]   {short} parent: {}", tc.test_label(&cand.packages));
             let (parent_out, parent_log) = tc.run_tests(&parent, cand)?;
             println!("[mine]   {short} parent: {parent_out:?}");
             std::fs::write(tdir.join("parent.log"), parent_log)?;
+            refetch("commit", &commit)?;
             println!("[mine]   {short} commit: {}", tc.test_label(&cand.packages));
             let (commit_out, commit_log) = tc.run_tests(&commit, cand)?;
             println!("[mine]   {short} commit: {commit_out:?}");

@@ -129,6 +129,12 @@ pub trait Toolchain: Sync {
     /// With network: fetch everything `tree` needs so the offline run can
     /// build. A failure is recorded but is not a verdict by itself.
     fn prefetch(&self, tree: &Path, cand: &Candidate) -> Result<(bool, String)>;
+    /// Whether the prefetched state is one shared slot that the other
+    /// tree's prefetch replaces (Bazel's output base): then each tree is
+    /// prefetched again right before its offline run.
+    fn prefetch_before_each_run(&self) -> bool {
+        false
+    }
     /// Without network: run the candidate's units on `tree`, classified.
     fn run_tests(&self, tree: &Path, cand: &Candidate) -> Result<(Outcome, String)>;
 
