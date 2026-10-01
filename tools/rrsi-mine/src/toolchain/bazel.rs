@@ -162,6 +162,14 @@ fn quoted(units: &[String]) -> String {
     units.iter().map(|u| sh_quote(u)).collect::<Vec<_>>().join(" ")
 }
 
+/// Whether `bazel test --nobuild` fetched and analysed everything: it
+/// always ends "Couldn't start the build. Unable to run tests" (nothing was
+/// built, so nothing can run), with a non-zero exit, after a successful
+/// analysis.
+pub fn prefetched(exit: i32, log: &str) -> bool {
+    exit == 0 || log.contains("Build completed successfully")
+}
+
 /// Lines that mean the run never reached the code: downloads, registries,
 /// repositories the offline run does not have.
 pub const INFRA_MARKERS: [&str; 14] = [
@@ -311,7 +319,7 @@ impl Toolchain for Bazel {
     fn prefetch(&self, tree: &Path, cand: &Candidate) -> Result<(bool, String)> {
         super::own_volume(&self.sandbox.image, &self.cache, tree)?;
         let (code, log) = self.exec(self.run(tree, cand, true, prefetch_script(&cand.packages)))?;
-        Ok((code == 0, log))
+        Ok((prefetched(code, &log), log))
     }
 
     fn run_tests(&self, tree: &Path, cand: &Candidate) -> Result<(Outcome, String)> {
@@ -448,6 +456,19 @@ mod tests {
         assert!(!blames_own("no such package '@@rules_go+//go': x"));
         // Own blame never hides an external fetch failure elsewhere.
         assert_eq!(classify(1, &format!("{OWN_TARGET_MISSING}{EXTERNAL_FETCH}")), Outcome::Infra);
+    }
+
+    // Regression, 2026-10-01 (fairness flake on the monorepo): every flake
+    // run was retried as "prefetch failed" because `test --nobuild` exits
+    // non-zero after a successful analysis.
+    #[test]
+    fn a_nobuild_test_analysis_that_succeeded_is_a_successful_prefetch() {
+        let log = "INFO: Analyzed target //app/cmd:cmd_test (229 packages loaded, 12278 targets configured).\n\
+                   INFO: Found 1 test target...\nINFO: Elapsed time: 16.985s, Critical Path: 0.00s\n\
+                   INFO: 0 processes.\nINFO: Build completed successfully, 0 total actions\n\
+                   ERROR: Couldn't start the build. Unable to run tests\n";
+        assert!(prefetched(1, log));
+        assert!(!prefetched(1, EXTERNAL_FETCH), "a failed analysis is a failed prefetch");
     }
 
     #[test]
