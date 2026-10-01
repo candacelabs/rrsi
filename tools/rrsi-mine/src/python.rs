@@ -17,7 +17,8 @@
 //! ```text
 //! import rrsi_mine
 //! rrsi_mine.list_candidates("/path/to/repo", "2026-06-01", toolchain="go") -> list[dict]
-//!                   (toolchain: go, python, cpp, bazel or auto; listing runs no container)
+//!                   (toolchain: go, python, bazel or auto; cpp is stubbed and raises;
+//!                    listing runs no container)
 //! rrsi_mine.export_tree(repo, sha, dest)
 //! rrsi_mine.apply_patch(tree, patch) -> str | None   (error text, or None)
 //! rrsi_mine.go_test(tree, module_root, packages, image=..., modcache=...,

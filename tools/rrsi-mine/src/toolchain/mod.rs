@@ -15,11 +15,10 @@
 //! Toolchains: what "the tests of this change" and "a test run" mean for one
 //! build system. A [`Toolchain`] owns five things:
 //!
-//! 1. detect project roots (`go.mod`, `pyproject.toml`, `CMakeLists.txt`,
-//!    `MODULE.bazel`, ...);
+//! 1. detect project roots (`go.mod`, `pyproject.toml`, `MODULE.bazel`, ...);
 //! 2. classify every changed file as source, test, generated or other;
 //! 3. map a commit's changed tests to test units (Go package, pytest file,
-//!    CTest test, Bazel test target);
+//!    Bazel test target);
 //! 4. run those units offline in a pinned container, after a separate
 //!    networked step that prefetches the dependencies (Go's `download`);
 //! 5. classify a run as Pass, TestFail, BuildFail, Infra or Timeout.

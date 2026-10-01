@@ -20,7 +20,8 @@
 //! network-less container after a networked step that prefetches the
 //! dependencies. What "source", "tests" and "a run" mean is a toolchain's
 //! business (src/toolchain): Go (`go test` in a `golang` container, the
-//! default), Python (pytest), C++ (CMake + CTest) and Bazel (`bazel test`).
+//! default), Python (pytest) and Bazel (`bazel test`); C++ is registered but
+//! stubbed (kaashmonee/candace-server#273).
 //!
 //! The `rrsi-mine` binary (src/main.rs) and the `rrsi_mine` Python module
 //! (src/python.rs, feature `python`) are thin fronts over this library:

@@ -29,7 +29,7 @@ fn choices() -> PossibleValuesParser {
 #[derive(Args, Clone, Debug)]
 pub struct ToolchainChoice {
     /// Which toolchain finds and validates candidates: go (the default),
-    /// python (pytest), cpp (CMake + CTest), bazel (`bazel test`), or auto
+    /// python (pytest), bazel (`bazel test`), cpp (stubbed), or auto
     /// (every toolchain with a project root at HEAD; a commit goes to the
     /// first that claims it, in that order).
     #[arg(long, default_value = "go", value_parser = choices())]
