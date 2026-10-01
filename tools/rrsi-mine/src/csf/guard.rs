@@ -68,7 +68,9 @@ impl GuardVerdict {
 /// sources beyond the convention (tree-relative).
 pub fn guard(tree: &Path, csfc_flag: Option<&Path>, grammar_flag: Option<&Path>, sources: &[String])
     -> Result<Vec<GuardVerdict>> {
-    let files = Source::dir(tree).files()?;
+    // The tree is an exported or patched checkout: list every file, without
+    // ignore rules, so a tracked architecture source is never hidden.
+    let files = Source::dir(tree).all_files()?;
     let models: Vec<&String> = files.iter()
         .filter(|f| csfc::is_model_source(f) || sources.contains(f)).collect();
     if models.is_empty() {

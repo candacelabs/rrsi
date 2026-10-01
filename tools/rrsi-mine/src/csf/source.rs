@@ -53,6 +53,26 @@ impl Source {
         Source::Dir(root.to_path_buf())
     }
 
+    /// Every regular file of a directory tree, ignoring `.gitignore` and
+    /// similar rules (only `.git` is skipped). For exported or patched
+    /// checkouts, where a tracked file matching an ignore rule (e.g. a
+    /// force-added `architecture.csf` under a `*.csf` rule) must still count.
+    pub fn all_files(&self) -> Result<Vec<String>> {
+        let Source::Dir(root) = self else { return self.files() };
+        let mut v = Vec::new();
+        let walk = ignore::WalkBuilder::new(root).standard_filters(false)
+            .filter_entry(|e| e.file_name() != ".git").build();
+        for entry in walk {
+            let entry = entry.context("walking the directory")?;
+            if entry.file_type().is_some_and(|t| t.is_file()) {
+                let rel = entry.path().strip_prefix(root).unwrap_or(entry.path());
+                v.push(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
+        v.sort();
+        Ok(v)
+    }
+
     /// Every regular file, repository-relative with `/` separators, sorted.
     pub fn files(&self) -> Result<Vec<String>> {
         let mut out = match self {
@@ -105,6 +125,37 @@ impl Source {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    #[test]
+    fn all_files_sees_tracked_files_that_match_ignore_rules() {
+        // Review (P2): the ignore-aware walk hid a force-added
+        // architecture.csf matching a `*.csf` rule, so guards were skipped.
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join(".gitignore"), "*.csf\n").unwrap();
+        std::fs::create_dir_all(d.path().join("csf/architecture")).unwrap();
+        std::fs::write(d.path().join(crate::csf::csfc::MODEL_SOURCE), "m").unwrap();
+        std::fs::create_dir(d.path().join(".git")).unwrap();
+        std::fs::write(d.path().join(".git/HEAD"), "x").unwrap();
+        let src = Source::dir(d.path());
+        assert!(src.all_files().unwrap().contains(&crate::csf::csfc::MODEL_SOURCE.to_string()));
+        assert!(!src.files().unwrap().contains(&crate::csf::csfc::MODEL_SOURCE.to_string()),
+                "the ignore-aware listing hides it, which is why guards must not use it");
+        assert!(!src.all_files().unwrap().iter().any(|f| f.starts_with(".git/")));
+    }
+
+    #[test]
+    fn guard_finds_an_ignored_architecture_source() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join(".gitignore"), "*.csf\n").unwrap();
+        std::fs::create_dir_all(d.path().join("csf/architecture")).unwrap();
+        std::fs::write(d.path().join(crate::csf::csfc::MODEL_SOURCE), "m").unwrap();
+        let missing = d.path().join("no-such-csfc");
+        let v = crate::csf::guard::guard(d.path(), Some(&missing), None, &[]).unwrap();
+        assert!(!v.is_empty());
+        assert!(v.iter().all(|g| !g.reason.contains("no architecture source")),
+                "the model must be found even though .gitignore matches it: {:?}",
+                v.iter().map(|g| &g.reason).collect::<Vec<_>>());
+    }
+
     use super::*;
     use std::process::Command;
 

@@ -43,9 +43,20 @@ pub fn parent_dir(path: &str) -> &str {
     path.rsplit_once('/').map(|(d, _)| d).unwrap_or("")
 }
 
+/// A repository-relative directory without `./` prefixes or trailing `/`;
+/// `.` and `./` are the repository root (`""`).
+fn norm_dir(dir: &str) -> &str {
+    let mut d = dir.trim_end_matches('/');
+    while let Some(rest) = d.strip_prefix("./") {
+        d = rest;
+    }
+    if d == "." { "" } else { d }
+}
+
 /// `dir` joined with a relative `path`; either may be empty.
 pub fn join(dir: &str, path: &str) -> String {
-    let path = path.trim_start_matches("./").trim_end_matches('/');
+    let dir = norm_dir(dir);
+    let path = norm_dir(path);
     match (dir.is_empty(), path.is_empty()) {
         (true, _) => path.to_string(),
         (false, true) => dir.to_string(),
@@ -154,6 +165,18 @@ impl MineCsf {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn join_treats_dot_as_the_repository_root() {
+        // Review (P2): `--csf-root .` produced `./pkg/money`, which never
+        // matched git paths like `pkg/money/x.go`.
+        assert_eq!(super::join(".", "pkg/money"), "pkg/money");
+        assert_eq!(super::join("./", "pkg/money"), "pkg/money");
+        assert_eq!(super::join("./svc/", "./gen/"), "svc/gen");
+        assert_eq!(super::join("", "."), "");
+        assert_eq!(super::join("a", ""), "a");
+        assert!(super::under(&super::join(".", "pkg/money"), "pkg/money"));
+    }
+
     use super::*;
 
     #[test]

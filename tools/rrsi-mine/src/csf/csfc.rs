@@ -75,12 +75,31 @@ pub fn parse_diagnostics(stderr: &str) -> Vec<Diagnostic> {
     }).collect()
 }
 
+/// `path` made absolute against `cwd` when it names a location relative to
+/// it. csfc runs with its working directory set to a temporary checkout, so a
+/// relative path the user typed must be resolved before that. A bare program
+/// name (no separator) is left alone so it is still looked up on PATH.
+pub fn absolutize(path: &Path, cwd: &Path) -> PathBuf {
+    if path.is_absolute() || path.components().count() < 2 {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    }
+}
+
+fn user_path(path: PathBuf) -> PathBuf {
+    match std::env::current_dir() {
+        Ok(cwd) => absolutize(&path, &cwd),
+        Err(_) => path,
+    }
+}
+
 /// Find csfc: `flag`, else RRSI_CSFC, else `csfc` on PATH.
 pub fn locate(flag: Option<&Path>) -> CsfcInfo {
     let (path, source): (Option<PathBuf>, &str) = match flag {
-        Some(p) => (Some(p.to_path_buf()), "flag"),
+        Some(p) => (Some(user_path(p.to_path_buf())), "flag"),
         None => match std::env::var_os("RRSI_CSFC").filter(|v| !v.is_empty()) {
-            Some(v) => (Some(PathBuf::from(v)), "env"),
+            Some(v) => (Some(user_path(PathBuf::from(v))), "env"),
             None => match std::env::var_os("PATH").and_then(|p| {
                 std::env::split_paths(&p).map(|d| d.join("csfc")).find(|c| c.is_file())
             }) {
@@ -111,10 +130,10 @@ impl CsfcInfo {
 /// The grammar csfc needs for a model rooted at `tree/root`.
 pub fn grammar(flag: Option<&Path>, tree: &Path, root: &str) -> Option<PathBuf> {
     if let Some(p) = flag {
-        return Some(p.to_path_buf());
+        return Some(user_path(p.to_path_buf()));
     }
     if let Some(v) = std::env::var_os("RRSI_CSF_GRAMMAR").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(v));
+        return Some(user_path(PathBuf::from(v)));
     }
     let own = tree.join(root).join(GRAMMAR_IN_CSF);
     own.is_file().then_some(own)
@@ -361,9 +380,24 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn user_supplied_relative_paths_are_resolved_before_csfc_changes_directory() {
+        // Review (P1): a relative --csfc/--csf-grammar was probed from the
+        // caller's directory but run from inside the temporary checkout.
+        let cwd = Path::new("/work/repo");
+        assert_eq!(absolutize(Path::new("bazel-bin/csf/csfc.exe"), cwd),
+                   PathBuf::from("/work/repo/bazel-bin/csf/csfc.exe"));
+        assert_eq!(absolutize(Path::new("./csfc"), cwd), PathBuf::from("/work/repo/./csfc"));
+        assert_eq!(absolutize(Path::new("/opt/csfc"), cwd), PathBuf::from("/opt/csfc"));
+        // A bare name is still looked up on PATH.
+        assert_eq!(absolutize(Path::new("csfc"), cwd), PathBuf::from("csfc"));
+    }
+
+    #[test]
     fn grammar_comes_from_the_flag_or_the_csf_checkout() {
         let d = tempfile::tempdir().unwrap();
         assert_eq!(grammar(Some(Path::new("/g.ebnf")), d.path(), ""), Some(PathBuf::from("/g.ebnf")));
+        let rel = grammar(Some(Path::new("csf/grammar.ebnf")), d.path(), "").unwrap();
+        assert!(rel.is_absolute(), "relative grammar must be resolved: {rel:?}");
         if std::env::var_os("RRSI_CSF_GRAMMAR").is_none() {
             assert_eq!(grammar(None, d.path(), "root"), None);
             let own = d.path().join("root").join(GRAMMAR_IN_CSF);

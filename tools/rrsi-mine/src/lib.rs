@@ -326,16 +326,26 @@ pub fn scan(repo: &Path, since: &str, csf: &csf::MineCsf) -> Result<(Vec<Candida
     Ok((out, rejected))
 }
 
+/// Write every tracked file of `sha` into `dest`, faithfully. `git archive`
+/// is deliberately not used: it drops paths marked `export-ignore` in
+/// `.gitattributes`, which can remove the very tests or architecture model
+/// a task depends on. A throwaway index plus `checkout-index` writes the tree
+/// exactly as committed, without touching the repository's own index.
 pub fn export_tree(repo: &Path, sha: &str, dest: &Path) -> Result<()> {
     std::fs::create_dir_all(dest)?;
-    let mut archive = Command::new("git").args(["archive", "--format=tar", sha])
-        .current_dir(repo).stdout(Stdio::piped()).spawn()?;
-    let tar = Command::new("tar").arg("-x").arg("-C").arg(dest)
-        .stdin(archive.stdout.take().context("git archive stdout")?).status()?;
-    if !archive.wait()?.success() || !tar.success() {
-        bail!("exporting {sha} failed");
-    }
-    Ok(())
+    let index_dir = tempfile::Builder::new().prefix("rrsi-index-").tempdir()?;
+    let index = index_dir.path().join("index");
+    let run = |args: &[&std::ffi::OsStr]| -> Result<()> {
+        let out = Command::new("git").args(args).current_dir(repo)
+            .env("GIT_INDEX_FILE", &index).output().context("running git")?;
+        if !out.status.success() {
+            bail!("exporting {sha} failed: {}", String::from_utf8_lossy(&out.stderr));
+        }
+        Ok(())
+    };
+    run(&["read-tree".as_ref(), sha.as_ref()])?;
+    let work_tree = std::ffi::OsString::from(format!("--work-tree={}", dest.display()));
+    run(&[work_tree.as_os_str(), "checkout-index".as_ref(), "--all".as_ref(), "--force".as_ref()])
 }
 
 pub fn workdir(root: &str) -> String {
@@ -662,6 +672,32 @@ mod tests {
         let fresh = tempfile::tempdir().unwrap();
         write_record(fresh.path(), &rec(Outcome::TestFail, Outcome::Pass)).unwrap();
         assert!(fresh.path().join("task.json").is_file());
+    }
+
+    #[test]
+    fn export_tree_keeps_export_ignored_paths() {
+        // Review (P2): `git archive` dropped `export-ignore` paths, removing
+        // the architecture model detection had just found.
+        let d = tempfile::tempdir().unwrap();
+        let r = d.path();
+        let git = |args: &[&str]| assert!(Command::new("git").args(args).current_dir(r)
+            .env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@example.invalid")
+            .env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@example.invalid")
+            .status().unwrap().success());
+        git(&["init", "-q"]);
+        std::fs::create_dir_all(r.join("csf")).unwrap();
+        std::fs::write(r.join("csf/architecture.csf"), "model\n").unwrap();
+        std::fs::write(r.join(".gitattributes"), "csf export-ignore\n").unwrap();
+        std::fs::write(r.join("main.go"), "package main\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "base"]);
+        let out = tempfile::tempdir().unwrap();
+        export_tree(r, "HEAD", out.path()).unwrap();
+        assert_eq!(std::fs::read_to_string(out.path().join("csf/architecture.csf")).unwrap(), "model\n");
+        assert!(out.path().join("main.go").is_file());
+        assert!(!out.path().join(".git").exists(), "the export is files only");
+        // The repository's own index is untouched.
+        git(&["diff", "--cached", "--quiet"]);
     }
 
     #[test]
