@@ -118,9 +118,8 @@ mod tests {
         let cli = Cli::parse_from(["x", "--toolchain", "cpp", "--toolchain-arg", "cpp=-DFMT_TEST=ON",
                                    "--toolchain-volume", "bazel=a,b", "--toolchain-image", "python=py:1"]);
         assert_eq!(cli.t.toolchain, "cpp");
-        let cpp = cli.s.config("cpp", 600).unwrap();
-        assert_eq!(cpp.args, ["-DFMT_TEST=ON"]);
-        assert!(cpp.sandbox.image.starts_with("mcr.microsoft.com/devcontainers/cpp:") && cpp.sandbox.image.contains("@sha256:"));
+        assert_eq!(cli.s.config("cpp", 600).unwrap().args, ["-DFMT_TEST=ON"]);
+        assert!(cli.s.config("bazel", 600).unwrap().sandbox.image.contains("@sha256:"));
         assert_eq!(cli.s.config("bazel", 1).unwrap().volumes, ["a", "b"]);
         assert_eq!(cli.s.config("python", 1).unwrap().sandbox.image, "py:1");
         assert_eq!(cli.s.config("python", 1).unwrap().volumes, ["rrsi-pydeps"]);

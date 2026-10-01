@@ -186,6 +186,17 @@ pub fn decide(parent: Outcome, commit: Outcome) -> (bool, &'static str) {
     }
 }
 
+/// The verdict the parent run alone decides, if any: a parent that passes,
+/// or that proved nothing (Infra, Timeout), makes the commit run pointless.
+/// Same reasons as [`decide`].
+pub fn decide_parent(parent: Outcome) -> Option<(bool, &'static str)> {
+    use Outcome::*;
+    match parent {
+        Infra | Timeout | Pass => Some(decide(parent, Pass)),
+        TestFail | BuildFail => None,
+    }
+}
+
 pub struct Docker<'a> {
     pub image: &'a str,
     pub modcache: &'a str,
@@ -340,6 +351,7 @@ pub fn apply_patch(tree: &Path, patch: &str) -> Result<Option<String>> {
 }
 
 pub fn validate(repo: &Path, out: &Path, cand: &Candidate, tc: &dyn Toolchain) -> Result<TaskRecord> {
+    tc.check()?;
     let tdir = out.join(&cand.sha[..12]);
     let task_json = tdir.join("task.json");
     if task_json.is_file() {
@@ -406,18 +418,26 @@ pub fn validate(repo: &Path, out: &Path, cand: &Candidate, tc: &dyn Toolchain) -
             let (parent_out, parent_log) = tc.run_tests(&parent, cand)?;
             println!("[mine]   {short} parent: {parent_out:?}");
             std::fs::write(tdir.join("parent.log"), parent_log)?;
-            refetch("commit", &commit)?;
-            println!("[mine]   {short} commit: {}", tc.test_label(&cand.packages));
-            let (commit_out, commit_log) = tc.run_tests(&commit, cand)?;
-            println!("[mine]   {short} commit: {commit_out:?}");
-            std::fs::write(tdir.join("commit.log"), commit_log)?;
-            let (valid, reason) = decide(parent_out, commit_out);
-            rec.valid = valid;
-            rec.reason = reason.into();
             rec.parent_outcome = Some(parent_out);
-            rec.commit_outcome = Some(commit_out);
             rec.fails_before = Some(matches!(parent_out, Outcome::TestFail | Outcome::BuildFail));
-            rec.passes_after = Some(commit_out == Outcome::Pass);
+            // Parent first: when the parent run already decides the task
+            // (it passed, or proved nothing), the commit is never run.
+            if let Some((valid, reason)) = decide_parent(parent_out) {
+                println!("[mine]   {short} commit: skipped ({reason})");
+                rec.valid = valid;
+                rec.reason = reason.into();
+            } else {
+                refetch("commit", &commit)?;
+                println!("[mine]   {short} commit: {}", tc.test_label(&cand.packages));
+                let (commit_out, commit_log) = tc.run_tests(&commit, cand)?;
+                println!("[mine]   {short} commit: {commit_out:?}");
+                std::fs::write(tdir.join("commit.log"), commit_log)?;
+                let (valid, reason) = decide(parent_out, commit_out);
+                rec.valid = valid;
+                rec.reason = reason.into();
+                rec.commit_outcome = Some(commit_out);
+                rec.passes_after = Some(commit_out == Outcome::Pass);
+            }
             if infra.is_some() {
                 rec.detail = infra;
             }
@@ -635,6 +655,76 @@ mod tests {
         let fresh = tempfile::tempdir().unwrap();
         write_record(fresh.path(), &rec(Outcome::TestFail, Outcome::Pass)).unwrap();
         assert!(fresh.path().join("task.json").is_file());
+    }
+
+    #[test]
+    fn the_parent_decides_alone_only_when_it_passed_or_proved_nothing() {
+        use Outcome::*;
+        assert_eq!(decide_parent(Pass), Some((false, "tests already pass on parent")));
+        assert_eq!(decide_parent(Infra).map(|d| d.0), Some(false));
+        assert_eq!(decide_parent(Timeout), Some((false, "timeout: a run was killed")));
+        assert_eq!(decide_parent(TestFail), None);
+        assert_eq!(decide_parent(BuildFail), None);
+    }
+
+    /// A toolchain whose runs are scripted; it counts runs per tree.
+    struct Scripted {
+        parent: Outcome,
+        runs: Mutex<Vec<String>>,
+    }
+
+    impl Toolchain for Scripted {
+        fn name(&self) -> &'static str { "go" }
+        fn is_root_marker(&self, _: &str) -> bool { false }
+        fn classify_file(&self, _: &str) -> toolchain::FileKind { toolchain::FileKind::Other }
+        fn project_root(&self, _: &toolchain::Changed) -> Option<String> { None }
+        fn units(&self, _: &toolchain::Changed, _: &str, _: &dyn Fn(&str) -> Result<String>) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+        fn prefetch_label(&self) -> &'static str { "prefetch" }
+        fn test_label(&self, _: &[String]) -> String { "test".into() }
+        fn prefetch(&self, _: &Path, _: &Candidate) -> Result<(bool, String)> { Ok((true, String::new())) }
+        fn run_tests(&self, tree: &Path, _: &Candidate) -> Result<(Outcome, String)> {
+            let which = tree.file_name().unwrap().to_string_lossy().into_owned();
+            self.runs.lock().unwrap().push(which.clone());
+            Ok((if which == "parent" { self.parent } else { Outcome::Pass }, String::new()))
+        }
+    }
+
+    // Regression, 2026-10-01: every candidate built and tested the commit
+    // tree even when the parent run had already decided the task.
+    #[test]
+    fn a_parent_that_passes_never_runs_the_commit() {
+        let d = tempfile::tempdir().unwrap();
+        let r = d.path().join("repo");
+        std::fs::create_dir_all(&r).unwrap();
+        let run = |args: &[&str]| assert!(Command::new("git").args(args).current_dir(&r)
+            .env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@example.invalid")
+            .env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@example.invalid")
+            .status().unwrap().success());
+        run(&["init", "-q"]);
+        std::fs::write(r.join("a.go"), "package a\n").unwrap();
+        run(&["add", "-A"]);
+        run(&["commit", "-qm", "base"]);
+        std::fs::write(r.join("a_test.go"), "package a\n").unwrap();
+        run(&["add", "-A"]);
+        run(&["commit", "-qm", "test"]);
+        let sha = git(&r, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        let parent = git(&r, &["rev-parse", "HEAD^"]).unwrap().trim().to_string();
+        let cand = Candidate { sha, parent, subject: "s".into(), body: String::new(), module_root: String::new(),
+                               packages: vec!["./".into()], src_files: vec!["a.go".into()],
+                               test_files: vec!["a_test.go".into()], src_churn: 1, toolchain: None };
+        for (parent_out, runs, reason) in [(Outcome::Pass, 1, "tests already pass on parent"),
+                                           (Outcome::BuildFail, 2, "ok")] {
+            let out = d.path().join(format!("tasks-{parent_out:?}"));
+            let tc = Scripted { parent: parent_out, runs: Mutex::new(vec![]) };
+            let rec = validate(&r, &out, &cand, &tc).unwrap();
+            assert_eq!(rec.reason, reason);
+            assert_eq!(tc.runs.lock().unwrap().len(), runs, "{parent_out:?}: {:?}", tc.runs.lock().unwrap());
+            if runs == 1 {
+                assert!(rec.commit_outcome.is_none() && !out.join(&cand.sha[..12]).join("commit.log").exists());
+            }
+        }
     }
 
     #[test]

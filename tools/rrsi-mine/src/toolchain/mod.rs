@@ -108,6 +108,10 @@ pub enum FileKind {
 pub trait Toolchain: Sync {
     /// Its registered name (`go`, `python`, ...).
     fn name(&self) -> &'static str;
+    /// Whether it can be used at all (a stubbed toolchain says why not).
+    fn check(&self) -> Result<()> {
+        Ok(())
+    }
     /// Whether a repository-relative path marks a project root.
     fn is_root_marker(&self, path: &str) -> bool;
     fn classify_file(&self, path: &str) -> FileKind;
@@ -391,7 +395,8 @@ mod tests {
             assert_eq!(tc.name(), r.name);
             assert!(!r.language.is_empty());
             assert_eq!(language(Some(r.name)).0, r.language);
-            assert!(r.name == "go" || r.image.contains("@sha256:"), "{} is pinned by digest", r.name);
+            assert!(r.name == "go" || r.name == "cpp" || r.image.contains("@sha256:"),
+                    "{} is pinned by digest (cpp is stubbed)", r.name);
         }
         assert_eq!(language(None), ("Go", "go"), "a task without a toolchain is Go");
     }

@@ -33,6 +33,7 @@ use std::path::Path;
 
 /// The candidates of `tc` since `since`, newest first.
 pub fn candidates(repo: &Path, since: &str, tc: &dyn Toolchain) -> Result<Vec<Candidate>> {
+    tc.check()?;
     if tc.name() == "go" {
         return crate::candidates(repo, since);
     }
