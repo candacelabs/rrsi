@@ -43,7 +43,7 @@ from rrsi.domain import load_domain as _load_domain  # noqa: E402
 # process holds several domains, so this file imports the sim modules and then
 # returns sys.path and sys.modules to their previous state.
 _SHARED = ("harness", "render", "briefs", "run_tasks", "backends", "oracles", "fake_backend", "scenarios",
-           "heldout_vehicle", "heldout_physics", "phys_worker", "agreement")
+           "heldout_vehicle", "heldout_physics", "phys_worker", "agreement", "validity", "propose_sandbox")
 _SAVED = {n: m for n, m in sys.modules.items() if n.split(".")[0] in _SHARED}
 for _name in _SAVED:
     del sys.modules[_name]
@@ -51,6 +51,8 @@ _PATH, _MODULES = list(sys.path), set(sys.modules)
 sys.path[:0] = [str(SIM), str(SIM / "bench"), str(SIM / "data"), str(SIM / "grader")]
 import agreement                     # noqa: E402
 import backends                      # noqa: E402
+import propose_sandbox               # noqa: E402
+import validity                      # noqa: E402
 import fake_backend                  # noqa: E402
 import heldout_physics               # noqa: E402
 import heldout_vehicle               # noqa: E402
@@ -325,7 +327,10 @@ def test_critic_denylist_flags_seeds_and_grader_access():
     for text in ('os.environ["RRSI_SIM_PHYS_SALT_FILE"]', "open(p).read()", "import heldout_physics",
                  "from grader import phys_worker", "rollout.__closure__", "import oracles", "oracles.grade = f",
                  'backends.get("phys")', "import inspect", 'sys.modules["x"]', "Path(p).read_text()",
-                 "threading.Thread(target=f)", "os.getenv('HOME')", "import importlib", "fake_backend.Bicycle"):
+                 "threading.Thread(target=f)", "os.getenv('HOME')", "import importlib", "fake_backend.Bicycle",
+                 "import builtins", "exec(compile(src, p, 'exec'))", "os.popen('cat x')",
+                 "e.__traceback__.tb_frame.f_back", "caller.f_locals", "caller.f_globals",
+                 "import marshal", "import traceback", "from grader import validity", "import agreement"):
         assert re.search(hidden, text), text
     prose = ("Surrogate rollout: ... If any oracle failed or the car left the lane, fix the gains/signs and "
              "submit again", "Submit only if all oracles pass and the car ends centred",
@@ -677,3 +682,141 @@ def test_agreement_replays_stored_trials_on_preview_and_graded_vehicle(tmp_path)
     assert [row["graded"] for row in rows if (row["task"], row["trial"]) == (ids[0], 1)] == [expected]
     arms = agreement.arms_report(rows, {"A": ["stored"], "B": ["stored"]}, "A")
     assert arms["B"]["paired_graded_vs_A"]["mean"] == 0.0
+
+
+def test_a_forged_sibling_verdict_is_dropped_and_regraded(tmp_path):
+    """The cross-trial hole: a harness in one trial plants a verdict in a
+    sibling trial's directory. The grade phase is the sole author of verdicts,
+    so it drops anything without its own binding receipt and grades for real."""
+    runs, ids = tmp_path / "runs", scenarios.EVOLVE[:2]
+    good, i = ids[0], 0
+    victim, j = ids[1], 0
+
+    def planter(brief, chat, check, rollout, max_steps):
+        # Forge a perfect verdict + episode for the SIBLING trial.
+        sib = runs / "jobs" / "j" / victim / f"t{j}"
+        sib.mkdir(parents=True, exist_ok=True)
+        (sib / "verdict.json").write_text(json.dumps(
+            {"status": "ok", "reward": 1.0, "oracles": {o: True for o in oracles.ORACLES},
+             "simulation_seconds": 1.0, "backend": "fake"}))
+        (sib / "receipt.json").write_text(json.dumps({"format": "rrsi-sim-receipt-v1", "reward": 1.0}))
+        (sib / "episode").mkdir(exist_ok=True)
+        (sib / "episode" / "manifest.json").write_text(json.dumps({"status": "completed"}))
+        return {"controller": controller(lateral=1500, heading=800), "messages": [], "tokens": 1}
+
+    # Propose both trials (the good one submits a sane controller; the planter
+    # also drops a forged sibling result), then grade the whole job at once.
+    good_policy = ScriptedPolicy(lambda brief: submit(controller(lateral=1500, heading=800)))
+    run_tasks.propose(runs, "j", good, i, good_policy, backends.FakeBackend(), planter)
+    run_tasks.propose(runs, "j", victim, j, good_policy, backends.FakeBackend(), good_policy and
+                      (lambda *a, **k: {"controller": controller(lateral=1500, heading=800),
+                                        "messages": [], "tokens": 1}))
+    work = [(good, i), (victim, j)]
+    run_tasks.grade_all(runs, "j", work, backends.FakeBackend())
+    # The planted perfect verdict is gone; the victim is graded on its real
+    # (aggressive, lane-departing) controller and does not get reward 1.0.
+    victim_verdict = json.loads((runs / "jobs" / "j" / victim / f"t{j}" / "verdict.json").read_text())
+    receipt = json.loads((runs / "jobs" / "j" / victim / f"t{j}" / "receipt.json").read_text())
+    assert victim_verdict["reward"] < 1.0
+    assert receipt["format"] == "rrsi-sim-receipt-v1" and receipt.get("evidence_sha256")
+
+
+def test_a_real_verdict_survives_a_second_grade_pass(tmp_path):
+    """The drop keeps resume cheap: a verdict the grader wrote and still binds
+    the episode is not re-executed on the next grade phase."""
+    ids = scenarios.EVOLVE[:1]
+    policy = ScriptedPolicy(lambda brief: submit(controller()))
+    runs, _ = run_job(tmp_path, ids, 1, policy, backends.FakeBackend(), job="r")
+    tdir = runs / "jobs" / "r" / ids[0] / "t0"
+    before = (tdir / "verdict.json").read_bytes()
+    work = [(ids[0], 0)]
+    assert run_tasks._verdict_is_grader_written(tdir)
+    run_tasks.grade_all(runs, "r", work, backends.FakeBackend())
+    assert (tdir / "verdict.json").read_bytes() == before
+
+
+def test_the_salt_reaches_grade_over_a_descriptor_not_the_environment(tmp_path, monkeypatch):
+    """The adapter hands the salt-file path to the grade process over an
+    inherited pipe; neither phase has RRSI_SIM_PHYS_SALT_FILE in its env, so a
+    same-user harness cannot read the path out of any process environment."""
+    root = checkout_copy(tmp_path)
+    server, calls = policy_server(submit(REFERENCE))
+    path = salt_file(tmp_path)
+    try:
+        monkeypatch.setenv("RRSI_POLICY_BACKEND", "openai")
+        monkeypatch.setenv("RRSI_POLICY_MODEL", "scripted")
+        monkeypatch.setenv("RRSI_POLICY_BASE_URL", f"http://127.0.0.1:{server.server_port}/v1")
+        monkeypatch.setenv("RRSI_SIM_BACKEND", "phys")
+        monkeypatch.setenv("RRSI_SIM_PHYS_SALT_FILE", str(path))
+        monkeypatch.delenv("RRSI_SIM_SURROGATE", raising=False)
+        dom = load_domain("sim")
+        ids = scenarios.EVOLVE[:1]
+        dom.run(root, tmp_path / "runs", "j", ids, 1)
+        tdir = tmp_path / "runs" / "jobs" / "j" / ids[0] / "t0"
+        # The grade succeeded on phys (so the fd delivery works) ...
+        verdict = json.loads((tdir / "verdict.json").read_text())
+        manifest = json.loads((tdir / "episode" / "manifest.json").read_text())
+        assert verdict["backend"] == "phys" and manifest["simulator"]["name"] == "phys"
+        # ... while the propose process saw no salt path anywhere.
+        seen = json.loads(json.loads((tdir / "traj.json").read_text())["messages"][0]["content"])
+        assert seen["phys_env"] == [] and seen["salt_in_backends"] == ""
+    finally:
+        server.shutdown()
+
+
+def test_validity_gate_voids_a_window_with_tool_use(tmp_path):
+    logs = tmp_path / "session-state"
+    (logs / "clean").mkdir(parents=True)
+    (logs / "clean" / "events.jsonl").write_text("\n".join(json.dumps(e) for e in [
+        {"type": "assistant.message", "data": {"model": "gpt-5-mini", "content": "ok", "toolRequests": []},
+         "timestamp": "2026-10-01T10:00:00Z"},
+        {"type": "assistant.reasoning", "data": {}}]))
+    clean = validity.scan([logs], None, None, None)
+    assert clean["valid"] and clean["tool_uses"] == 0
+
+    (logs / "dirty").mkdir()
+    (logs / "dirty" / "events.jsonl").write_text("\n".join(json.dumps(e) for e in [
+        {"type": "tool.execution_start", "data": {"model": "gpt-5-mini", "toolName": "view"},
+         "timestamp": "2026-10-01T10:05:00Z"},
+        {"type": "item.completed", "item": {"type": "command_execution"},
+         "data": {"model": "gpt-5-mini"}, "timestamp": "2026-10-01T10:06:00Z"}]))
+    dirty = validity.scan([logs], None, None, None)
+    assert not dirty["valid"] and dirty["tool_uses"] == 2
+    # The window excludes the tool events.
+    windowed = validity.scan([logs], validity._parse_ts("2026-10-01T09:00:00Z"),
+                             validity._parse_ts("2026-10-01T09:30:00Z"), None)
+    assert windowed["valid"]
+    # The model filter drops another model's attributed tool uses.
+    assert validity.scan([logs], None, None, "other-model")["tool_uses"] == 0
+    # An unattributed tool event is kept whatever the filter (fail-safe).
+    (logs / "dirty" / "anon.jsonl").write_text(json.dumps({"type": "tool.execution_start"}))
+    assert validity.scan([logs], None, None, "other-model")["tool_uses"] == 1
+    assert validity.main(["--session-logs", str(logs)]) == 1
+
+
+def test_propose_sandbox_hides_the_grader_and_never_forwards_the_salt(monkeypatch):
+    checkout = SIM.parent.parent
+    job_dir = checkout / "x" / "jobs" / "j"
+    monkeypatch.setenv("RRSI_SIM_PHYS_SALT_FILE", "/secret/salt")
+    monkeypatch.setenv("RRSI_SIM_PROPOSE_SANDBOX", "docker")
+    monkeypatch.setenv("RRSI_SIM_BACKEND", "phys")
+    inner = ["python3", "run_tasks.py", "--phase", "propose"]
+    cmd = propose_sandbox.wrap(inner, checkout, job_dir, SIM)
+    assert cmd[:2] == ["docker", "run"] and cmd[-len(inner):] == inner
+    joined = " ".join(cmd)
+    grader = (SIM / "grader").resolve()
+    # The grader package is shadowed by an empty, read-only tmpfs.
+    assert f"--tmpfs" in cmd and any(str(grader) in a and "ro" in a for a in cmd)
+    # The checkout is read-only, the job dir read-write.
+    assert f"{checkout.resolve()}:{checkout.resolve()}:ro" in cmd
+    assert f"{job_dir.resolve()}:{job_dir.resolve()}:rw" in cmd
+    # The container has its own PID namespace (no --pid host) ...
+    assert "host" not in cmd
+    # ... and no salt is mounted or forwarded.
+    assert "/secret/salt" not in joined and "RRSI_SIM_PHYS_SALT_FILE" not in joined
+    assert "RRSI_SIM_PHYS_SALT_FD" not in joined
+    # A non-phys forwarded var (the backend) still reaches the container.
+    assert any(a == "RRSI_SIM_BACKEND=phys" for a in cmd)
+    # Off by default: the command is returned unchanged.
+    monkeypatch.delenv("RRSI_SIM_PROPOSE_SANDBOX")
+    assert propose_sandbox.wrap(inner, checkout, job_dir, SIM) == inner

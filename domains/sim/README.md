@@ -166,25 +166,57 @@ campaign episode ids is solved by some controller of the 168-controller grid
 below.
 
 **What is hidden, and how.** The salt is an owner-only file outside the
-repository (`RRSI_SIM_PHYS_SALT_FILE`); no default exists in code, and the
-worker exits before writing `batch.json` without a valid one, so a batch is
-infra rather than graded on nominal physics. Evidence carries only the
-distribution name, a salt id (the first 16 hex digits of SHA-256 of the salt)
-and a SHA-256 of each episode's draw, never the drawn values;
-`grader/phys_worker.py --explain <task>--t<i>` prints one draw for an
-operator. Each evaluation runs the evaluated commit's runner as two processes:
-`--phase propose` (policy, harness and preview, in an environment with no
-`RRSI_SIM_PHYS_*` variable, never constructing the graded backend; anything
-it leaves where the grader writes is deleted) and `--phase grade` (simulator
-backend and oracles, no harness import). This is **forbidden (critic), not
-prevented: the harness runs in process as the same user**, so it could still
-open the salt file if it found it, import grader modules from the checkout or
-introspect the runner. The critic's precheck rejects those reaches in code
-(grader module names, `os.environ`, `open(`, `Path(`, `importlib`,
-interpreter internals, threads) and the critic brief says the same; a
-sandbox under another user would turn this into prevention. Evaluating a
-commit whose runner predates the split fails loudly: overlay its
-`domains/sim/harness/` onto the current grader commit instead.
+repository; no default exists in code, and the worker exits before writing
+`batch.json` without a valid one, so a batch is infra rather than graded on
+nominal physics. Evidence carries only the distribution name, a salt id (the
+first 16 hex digits of SHA-256 of the salt) and a SHA-256 of each episode's
+draw, never the drawn values; `grader/phys_worker.py --explain <task>--t<i>`
+prints one draw for an operator.
+
+Five layers keep the grade out of the agent's reach, in order of strength:
+
+1. **The policy and search models have no tools.** They run through logged-in
+   agent CLIs; `rrsi/cli_llm.py` launches every call with an allowlist naming
+   a tool that does not exist (Copilot CLI 1.0.90 reads `--available-tools ""`
+   as *no restriction*, so that spelling is wrong), Codex with its shell
+   disabled, and *verifies from the CLI's own event stream* that no tool was
+   requested or run, dropping the reply otherwise. A model therefore cannot
+   read a file, the salt or another arm's verdict. `grader/validity.py` is the
+   after-the-fact backstop: it scans the CLI session logs for tool-execution
+   events in a campaign window and voids any evaluation that overlaps one.
+2. **The grade runs in a separate process with no salt in its environment.**
+   Each evaluation runs the evaluated runner as `--phase propose` (policy,
+   harness and preview, with every `RRSI_SIM_PHYS_*` variable stripped, never
+   constructing the graded backend) and `--phase grade` (backend and oracles,
+   no harness import). The adapter hands the salt-file path to the grade
+   process over an inherited pipe (`RRSI_SIM_PHYS_SALT_FD`), not a variable, so
+   the path is in no process environment the harness could read back through
+   `/proc`. Launch the campaign with the salt variable set only for the
+   campaign command, never `export`ed into the shell or the loop.
+3. **The grade phase is the sole author of its evidence.** Verdict, receipt
+   and episode are rebuilt every grade phase unless a receipt this grader wrote
+   still binds the verdict and the episode files on disk, so a harness cannot
+   plant a `verdict.json` in its own or a sibling trial and have it kept; a
+   forged receipt would need the real episode, which needs the hidden grader.
+4. **The propose phase can run in a container.** With
+   `RRSI_SIM_PROPOSE_SANDBOX=docker` the harness runs with the grader package
+   shadowed by an empty mount, no salt mounted or exported, its own PID
+   namespace (so `/proc` holds no host process) and only its job's runs
+   directory writable. This is the prevention layer for evolved rounds.
+5. **The critic precheck is a lint, not the boundary.** It rejects the obvious
+   reaches in a diff (grader module names, `os.environ`, `open(`, `Path(`,
+   `importlib`, interpreter internals, frame access, `exec`/`compile`,
+   threads), and the critic brief says the same, but a regex over text cannot
+   catch string-concatenation obfuscation; prevention is layers 1-4.
+
+So, at a single Unix user without the sandbox, reaching the grader is
+**forbidden (critic and brief), not prevented: the harness runs in process as
+the same user.** The fixed-arm campaign (H_0, H_1, B) is unaffected -- none of
+those harnesses reads a file, the environment or the interpreter (git-grep: 0
+hits) and the policy has no tools -- and the sandbox turns the general case
+into prevention. Evaluating a commit whose runner predates the phase split
+fails loudly: overlay its `domains/sim/harness/` onto the current grader
+commit instead.
 
 **Commit, then reveal.** Before a campaign, the operator logs SHA-256 of the
 salt and its salt id; after the campaign, the salt is published, so anyone can

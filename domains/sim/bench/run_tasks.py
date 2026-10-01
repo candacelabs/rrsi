@@ -70,12 +70,50 @@ def _load_harness():
     return run_agent
 
 
+RECEIPT_FORMAT = "rrsi-sim-receipt-v1"
+
+
 def _scrub(tdir: Path) -> None:
     """Evidence cannot exist before the grade phase; remove anything the
     agent left where the grader writes."""
     for name in ("verdict.json", "receipt.json"):
         (tdir / name).unlink(missing_ok=True)
     shutil.rmtree(tdir / "episode", ignore_errors=True)
+
+
+def _verdict_is_grader_written(tdir: Path) -> bool:
+    """A verdict counts only with a receipt this grader wrote that still binds
+    the verdict and the episode on disk. The propose phase writes neither, so a
+    harness that drops a verdict.json (its own trial or a sibling's) leaves no
+    matching receipt; and it cannot forge the receipt's evidence hashes without
+    producing the real episode, which needs the hidden grader and its salt.
+    Without that binding the artifacts are discarded and the trial is graded
+    again, so forged evidence never survives (README "Held-out physics")."""
+    receipt = read(tdir / "receipt.json")
+    if not (receipt and receipt.get("format") == RECEIPT_FORMAT):
+        return False
+    if not (tdir / "verdict.json").is_file():
+        return False
+    if sha256_file(tdir / "verdict.json") != receipt.get("verdict_sha256"):
+        return False
+    episode = tdir / "episode"
+    for name, want in (receipt.get("evidence_sha256") or {}).items():
+        if sha256_file(episode / name) != want:
+            return False
+    return bool(receipt.get("evidence_sha256"))
+
+
+def _drop_unverified_evidence(runs: Path, job: str, work: list) -> None:
+    """At the start of every grade phase, discard any verdict, receipt or
+    episode that this grader did not write. The grade phase is the sole author
+    of those three; keeping a consistent set makes resume cheap, and scrubbing
+    everything else closes the cross-trial planting hole."""
+    for tid, i in work:
+        tdir = runs / "jobs" / job / tid / f"t{i}"
+        if not tdir.is_dir():
+            continue
+        if not _verdict_is_grader_written(tdir):
+            _scrub(tdir)
 
 
 def _load_policy():
@@ -202,8 +240,11 @@ def execute(runs: Path, job: str, pending: list[tuple[str, int]], backend: backe
 
 def grade_trial(tdir: Path, task: dict, backend_name: str) -> str:
     meta = read(tdir / "meta.json") or {}
-    if (tdir / "verdict.json").is_file():
+    if _verdict_is_grader_written(tdir):
         return "kept"
+    # A verdict without the grader's own binding receipt is forged; discard it
+    # (the episode is re-graded below), so a harness cannot plant a result.
+    (tdir / "verdict.json").unlink(missing_ok=True)
     if meta.get("status") == "infra":
         return "infra"
     if meta.get("status") == "crash" or not (tdir / "controller.json").is_file():
@@ -217,7 +258,7 @@ def grade_trial(tdir: Path, task: dict, backend_name: str) -> str:
     write(tdir / "verdict.json", verdict)
     episode = tdir / "episode"
     write(tdir / "receipt.json", {
-        "format": "rrsi-sim-receipt-v1", "task": task["id"], "backend": backend_name,
+        "format": RECEIPT_FORMAT, "task": task["id"], "backend": backend_name,
         "batch": meta.get("batch", ""), "scenario_sha256": sha256_json(task["scenario"]),
         "goal_metres": task["goal_metres"],
         "controller_sha256": sha256_file(tdir / "controller.json"),
@@ -240,6 +281,7 @@ def propose_all(runs: Path, job: str, work: list[tuple[str, int]]) -> dict:
 
 def grade_all(runs: Path, job: str, work: list[tuple[str, int]], backend: backends.Backend) -> str:
     """The grader's phase: execute and grade, with no policy and no harness."""
+    _drop_unverified_evidence(runs, job, work)
     pending = [(t, i) for t, i in work
                if (runs / "jobs" / job / t / f"t{i}" / "controller.json").is_file()
                and (read(runs / "jobs" / job / t / f"t{i}" / "meta.json") or {}).get("status") == "ok"

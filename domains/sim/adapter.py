@@ -33,8 +33,14 @@ failure. Trial i of task X in job J is runs/sim/jobs/J/X/t<i>/.
 Each evaluation runs the evaluated commit's runner twice: `--phase propose`
 (policy and harness, in an environment without RRSI_SIM_PHYS_* variables)
 and then `--phase grade` (simulator backend and oracles, no harness). On the
-held-out-physics backend (`phys`) the harness therefore never shares a
-process with the grader or sees where the salt is (README "Held-out physics").
+held-out-physics backend (`phys`) the harness therefore never shares a process
+with the grader, and the salt-file path is handed to the grade process over an
+inherited pipe rather than a variable, so it is in no process environment the
+harness can read. This is forbidden-not-prevented at a single Unix user: a
+hostile harness runs as the same user and could still open the salt if it
+discovered the path, import grader modules from the checkout, or introspect
+the runner. Set RRSI_SIM_PROPOSE_SANDBOX=docker to run the harness with none of
+those reachable (README "Held-out physics").
 """
 
 from __future__ import annotations
@@ -80,13 +86,19 @@ class SimDomain(Domain):
         # internals is forbidden here rather than prevented. Every alternative
         # is code-shaped: prose such as "surrogate plant" or "the oracles"
         # must stay legal, and a precheck hit is a hard reject.
-        (r"heldout_vehicle|heldout_physics|phys_worker|\bgrader/|(?:import|from)\s+grader\b|fake_backend|"
+        # A LINT, not the boundary: a regex over diff text cannot catch string
+        # concatenation or other obfuscation, so prevention comes from the
+        # propose sandbox (RRSI_SIM_PROPOSE_SANDBOX=docker) and the tool-less
+        # policy, not from this list. It still rejects the obvious reaches.
+        (r"heldout_vehicle|heldout_physics|phys_worker|agreement|\bvalidity\b|\bgrader/|"
+         r"(?:import|from)\s+grader\b|fake_backend|"
          r"(?:import|from)\s+(?:oracles|scenarios|backends|run_tasks|briefs|render)\b|"
          r"\b(?:oracles|backends)\.[A-Za-z_]|"
          r"RRSI_SIM_|salt_file|salt_id|\bhmac\b|os\.environ|getenv|/proc/|\bopen\(|read_text|read_bytes|\bPath\(|"
          r"pathlib|\bglob\b|os\.(?:walk|listdir|scandir)|importlib|__import__|sys\.(?:modules|path)|__closure__|"
          r"__globals__|__code__|\binspect\.|import\s+inspect|\bgc\.|_getframe|\bthreading\b|multiprocessing|"
-         r"ctypes|pickle",
+         r"ctypes|pickle|\bbuiltins\b|\bexec\(|\bcompile\(|os\.popen|\bFileIO\b|\bmarshal\b|\btraceback\b|"
+         r"f_back|f_locals|f_globals|f_code|tb_frame|co_consts",
          "reads the grader, its hidden physics or salt, the environment, files or interpreter internals"),
     ]
     component_signals = [
@@ -134,24 +146,59 @@ class SimDomain(Domain):
                 raise SystemExit(f"phys simulator backend: {problem}")
         log = runs_dir / "logs" / f"{log_prefix or job}.log"
         log.parent.mkdir(parents=True, exist_ok=True)
-        agent_env = {name: value for name, value in os.environ.items() if not name.startswith("RRSI_SIM_PHYS_")}
+        # Neither phase is given the salt-file path in its environment. The
+        # propose phase (policy and the evolvable harness) runs with every
+        # RRSI_SIM_PHYS_* variable stripped; the grade phase is handed the path
+        # over an inherited pipe (RRSI_SIM_PHYS_SALT_FD), so the path is in no
+        # process's environment that a same-user harness could read back
+        # through /proc. True isolation from a hostile harness still needs the
+        # propose sandbox or a separate user (README "Held-out physics").
+        salt_path = os.environ.get("RRSI_SIM_PHYS_SALT_FILE", "")
+        base_env = {name: value for name, value in os.environ.items() if not name.startswith("RRSI_SIM_PHYS_")}
+
+        def run_phase(phase: str) -> int:
+            start = log.stat().st_size if log.is_file() else 0
+            salt_fd = None
+            env = dict(base_env)
+            pass_fds: tuple = ()
+            if phase == "grade" and salt_path:
+                read_fd, write_fd = os.pipe()
+                os.write(write_fd, salt_path.encode())
+                os.close(write_fd)
+                os.set_inheritable(read_fd, True)
+                env["RRSI_SIM_PHYS_SALT_FD"] = str(read_fd)
+                salt_fd, pass_fds = read_fd, (read_fd,)
+            cmd = self._cmd(root, runs_dir, job, ids, k, backend) + ["--phase", phase]
+            if phase == "propose":
+                sys.path.insert(0, str(HERE / "bench"))
+                import propose_sandbox
+                cmd = propose_sandbox.wrap(cmd, root, runs_dir / "jobs" / job, root / "domains" / "sim")
+            try:
+                with open(log, "a") as lf:
+                    r = subprocess.run(cmd, cwd=str(root / "domains" / "sim"),
+                                       stdout=lf, stderr=subprocess.STDOUT,
+                                       env=env, pass_fds=pass_fds, close_fds=True)
+            finally:
+                if salt_fd is not None:
+                    try:
+                        os.close(salt_fd)
+                    except OSError:
+                        pass
+            if r.returncode != 0:
+                print(f"[sim] WARNING {phase} rc={r.returncode} (see {log})", flush=True)
+                with open(log, "rb") as lf:
+                    lf.seek(start)
+                    if b"unrecognized arguments: --phase" in lf.read():
+                        raise SystemExit(
+                            "the evaluated commit's runner predates the propose/grade split; evaluate its "
+                            "harness overlaid on the current grader commit instead (README \"Held-out physics\")")
+            return r.returncode
+
         # A policy-endpoint failure or a simulator crash leaves a trial without
         # a verdict; one retry pass fills them before scoring counts them missing.
         for _ in range(2):
-            for phase, env in (("propose", agent_env), ("grade", None)):
-                start = log.stat().st_size if log.is_file() else 0
-                with open(log, "a") as lf:
-                    r = subprocess.run(self._cmd(root, runs_dir, job, ids, k, backend) + ["--phase", phase],
-                                       cwd=str(root / "domains" / "sim"), stdout=lf, stderr=subprocess.STDOUT,
-                                       env=env)
-                if r.returncode != 0:
-                    print(f"[sim] WARNING {phase} rc={r.returncode} (see {log})", flush=True)
-                    with open(log, "rb") as lf:
-                        lf.seek(start)
-                        if b"unrecognized arguments: --phase" in lf.read():
-                            raise SystemExit(
-                                "the evaluated commit's runner predates the propose/grade split; evaluate its "
-                                "harness overlaid on the current grader commit instead (README \"Held-out physics\")")
+            run_phase("propose")
+            run_phase("grade")
             if all((runs_dir / "jobs" / job / t / f"t{i}" / "verdict.json").is_file()
                    for t in ids for i in range(k)):
                 break

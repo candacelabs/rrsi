@@ -84,9 +84,28 @@ CSF_ROOT = os.environ.get("RRSI_SIM_CSF_ROOT", "")
 CSF_RUNTIME = os.environ.get("RRSI_SIM_CSF_RUNTIME", "")
 CANDACE = os.environ.get("RRSI_SIM_CANDACE", "candace")
 BATCH_TIMEOUT = float(os.environ.get("RRSI_SIM_BATCH_TIMEOUT", "3600"))
+def _salt_file_at_import() -> str:
+    """The grader's salt-file path, read once, before any harness code runs.
+
+    The adapter hands the grade subprocess its path over an inherited file
+    descriptor (`RRSI_SIM_PHYS_SALT_FD`), not a variable, so the path is not
+    in this process's environment for a same-user harness to read back through
+    `/proc`. `RRSI_SIM_PHYS_SALT_FILE` stays as the fallback for `--phase all`
+    and tests. Either way only the path is read here; the salt bytes are read
+    only by the phys worker it launches."""
+    fd = os.environ.get("RRSI_SIM_PHYS_SALT_FD", "")
+    if fd:
+        try:
+            with os.fdopen(int(fd), "r", closefd=True) as handle:
+                return handle.read().strip()
+        except (OSError, ValueError):
+            return ""
+    return os.environ.get("RRSI_SIM_PHYS_SALT_FILE", "")
+
+
 # Captured at import: the runner removes it from its own environment before
-# any harness code runs, and only the grading process passes it on.
-_PHYS_SALT_FILE = os.environ.get("RRSI_SIM_PHYS_SALT_FILE", "")
+# any harness code runs, and only the grading process is given it, over a fd.
+_PHYS_SALT_FILE = _salt_file_at_import()
 SIM = Path(__file__).resolve().parent.parent
 BACKENDS = ("fake", "command", "cpu", "carla", "phys", "none")
 
