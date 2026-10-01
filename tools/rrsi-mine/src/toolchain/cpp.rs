@@ -227,13 +227,12 @@ pub fn targets_for(targets: &[Target], tests: &[CtestTest], names: &[String]) ->
 }
 
 /// Lines that mean the run never reached the code.
-pub const INFRA_MARKERS: [&str; 10] = [
+pub const INFRA_MARKERS: [&str; 9] = [
     "rrsi: no configured build",
     "Could not resolve host",
     "Couldn't resolve host",
     "Failed to download",
     "error: downloading",
-    "FETCHCONTENT_FULLY_DISCONNECTED",
     "Could NOT find",
     "No tests were found",
     "No space left on device",
@@ -507,10 +506,18 @@ mod tests {
         assert_eq!(classify(3, &format!("{OWN_HEADER_MISSING}{THIRD_PARTY_HEADER}"), &mine), Outcome::Infra);
     }
 
+    // Regression, 2026-10-01 (fmt task cfb57bfa3aa9): CMake warns that the
+    // offline run's own -DFETCHCONTENT_FULLY_DISCONNECTED=ON went unused;
+    // that warning once made every failing run Infra.
+    const UNUSED_VARIABLE_WARNING: &str = "CMake Warning:\n\
+        \x20 Manually-specified variables were not used by the project:\n\n\
+        \x20   FETCHCONTENT_FULLY_DISCONNECTED\n";
+
     #[test]
     fn ctest_failures_passes_and_timeouts_classify() {
         let mine = own(&[]);
         assert_eq!(classify(8, CTEST_FAILED, &mine), Outcome::TestFail);
+        assert_eq!(classify(8, &format!("{CTEST_FAILED}{UNUSED_VARIABLE_WARNING}"), &mine), Outcome::TestFail);
         assert_eq!(classify(0, "100% tests passed, 0 tests failed out of 1", &mine), Outcome::Pass);
         assert_eq!(classify(137, "", &mine), Outcome::Timeout);
         assert_eq!(classify(1, "something odd", &mine), Outcome::Infra);
