@@ -36,18 +36,17 @@ fn err(e: anyhow::Error) -> PyErr {
     PyRuntimeError::new_err(format!("{e:#}"))
 }
 
-/// Toolchains with default container settings: enough for listing.
+/// Toolchains with the CLI's default settings: enough for listing.
 fn listing_toolchains() -> crate::Toolchains {
-    use crate::toolchain::{bazel::Bazel, cpp::Cpp, go::Go, python::Python, Sandbox};
-    let sb = || Sandbox { image: String::new(), cpus: "4".into(), memory: "6g".into(), timeout: 600,
-                          prefetch_timeout: 3600 };
-    crate::Toolchains { all: vec![
-        Box::new(Go { image: "golang:1.26.5".into(), modcache: "rrsi-gomodcache".into(),
-                      buildcache: "rrsi-gobuildcache".into(), test_timeout: 600 }),
-        Box::new(Python { sandbox: sb(), deps: String::new() }),
-        Box::new(Cpp { sandbox: sb(), cmake_args: vec![] }),
-        Box::new(Bazel { sandbox: sb(), cache: String::new(), lock: Default::default() }),
-    ] }
+    use clap::Parser;
+    #[derive(Parser)]
+    struct Defaults {
+        #[command(flatten)]
+        s: crate::toolchain::settings::Settings,
+    }
+    let go = crate::toolchain::go::Go { image: "golang:1.26.5".into(), modcache: "rrsi-gomodcache".into(),
+                                        buildcache: "rrsi-gobuildcache".into(), test_timeout: 600 };
+    Defaults::parse_from(["rrsi_mine"]).s.toolchains(go)
 }
 
 #[pyfunction]

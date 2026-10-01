@@ -38,6 +38,7 @@ pub mod bazel;
 pub mod cpp;
 pub mod go;
 pub mod python;
+pub mod settings;
 
 /// What a changed file is, for one toolchain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
