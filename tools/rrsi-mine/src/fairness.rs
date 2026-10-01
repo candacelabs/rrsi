@@ -33,7 +33,8 @@
 
 use crate::llm::Copilot;
 use crate::scan::{self, Required};
-use crate::{Docker, Outcome, TaskRecord};
+use crate::toolchain::{self, FileKind, Toolchains};
+use crate::{Outcome, TaskRecord};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -58,18 +59,36 @@ impl Task {
         &self.rec.cand.sha[..12.min(self.rec.cand.sha.len())]
     }
 
+    /// The task's toolchain (`go` for tasks mined before toolchains).
+    pub fn toolchain(&self) -> &str {
+        self.rec.cand.toolchain.as_deref().unwrap_or("go")
+    }
+
+    pub fn is_go(&self) -> bool {
+        self.toolchain() == "go"
+    }
+
     /// tests.patch restricted to the packages `go test` runs: test files of
-    /// other packages are never graded, so no stage may rely on them.
+    /// other packages are never graded, so no stage may rely on them. Other
+    /// toolchains' tests.patch holds only the tests of the units they run.
     pub fn graded_tests(&self) -> Result<String> {
-        Ok(scan::patch_in_dirs(&self.read("tests.patch")?, &self.package_dirs()))
+        let patch = self.read("tests.patch")?;
+        Ok(if self.is_go() { scan::patch_in_dirs(&patch, &self.package_dirs()) } else { patch })
     }
 
     pub fn read(&self, name: &str) -> Result<String> {
         std::fs::read_to_string(self.dir.join(name)).with_context(|| format!("{}/{name}", self.short()))
     }
 
-    /// Repository-relative directories of the task's packages.
+    /// Repository-relative directories of the task's packages (for a
+    /// non-Go task: the directories of its source and test files).
     pub fn package_dirs(&self) -> Vec<String> {
+        let c = &self.rec.cand;
+        if !self.is_go() {
+            let dirs: std::collections::BTreeSet<String> = c.src_files.iter().chain(&c.test_files)
+                .map(|f| crate::dir_of(f)).collect();
+            return dirs.into_iter().collect();
+        }
         let root = &self.rec.cand.module_root;
         self.rec.cand.packages.iter().map(|p| {
             let rel = p.trim_start_matches("./").trim_end_matches('/');
@@ -198,18 +217,34 @@ fn pass_word(p: bool) -> &'static str {
 // ---- flake ----
 
 /// Re-run the commit tree's tests `runs` times; every run must pass.
-pub fn flake(repo: &Path, t: &Task, docker: &Docker, runs: usize) -> Result<Step> {
+pub fn flake(repo: &Path, t: &Task, tcs: &Toolchains, runs: usize) -> Result<Step> {
+    let tc = tcs.for_candidate(&t.rec.cand)?;
     let work = tempfile::Builder::new().prefix("rrsi-flake-").tempdir()?;
     let tree = work.path().join("commit");
     crate::export_tree(repo, &t.rec.cand.sha, &tree)?;
-    let (ok, log) = docker.download(&tree, &t.rec.cand.module_root)?;
-    if !ok {
+    // Same protection as validation: with a shared prefetch slot (Bazel),
+    // hold it for the whole sequence and refetch right before every run,
+    // or a concurrent task's prefetch replaces this tree's dependencies.
+    let _serial = crate::shared_prefetch_guard(tc);
+    let prefetch = || -> Result<Option<Step>> {
+        let (ok, log) = tc.prefetch(&tree, &t.rec.cand)?;
+        if ok {
+            return Ok(None);
+        }
         let tail: String = log.chars().rev().take(200).collect::<Vec<_>>().into_iter().rev().collect();
-        return Ok(Step::Retry(format!("infra: go mod download failed: {}", tail.trim())));
+        Ok(Some(Step::Retry(format!("infra: {} failed: {}", tc.prefetch_label(), tail.trim()))))
+    };
+    if let Some(retry) = prefetch()? {
+        return Ok(retry);
     }
     let mut outcomes = Vec::new();
     for i in 0..runs {
-        let (out, log) = docker.go_test(&tree, &t.rec.cand.module_root, &t.rec.cand.packages)?;
+        if i > 0 && tc.prefetch_before_each_run() {
+            if let Some(retry) = prefetch()? {
+                return Ok(retry);
+            }
+        }
+        let (out, log) = tc.run_tests(&tree, &t.rec.cand)?;
         if out == Outcome::Infra {
             return Ok(Step::Retry(format!("infra on run {}", i + 1)));
         }
@@ -285,13 +320,14 @@ fn capped(s: &str, n: usize) -> String {
 pub fn describe_prompt(t: &Task, tests_patch: &str, existing: &str, required: &[Required],
                        feedback: &str) -> String {
     let c = &t.rec.cand;
+    let (lang, fence) = toolchain::language(c.toolchain.as_deref());
     let api: String = required.iter().map(|r| if r.signature.is_empty() {
         format!("- `{}` ({}; signature not known: describe what it must be from its use)\n", r.symbol, r.kind)
     } else {
         format!("- `{}` ({}): `{}`\n", r.symbol, r.kind, r.signature)
     }).collect();
     format!("\
-You are writing the problem statement for a coding exercise in a Go repository.
+You are writing the problem statement for a coding exercise in a {lang} repository.
 A developer will receive ONLY your statement and the repository as it is now.
 Write it as the GitHub issue a maintainer would file asking for this change.
 You have no tools and need none: everything you may use is below.
@@ -331,7 +367,7 @@ Required API:
 {api}
 Existing code of the package(s) before the change (for context: what exists
 and must keep working):
-```go
+```{fence}
 {existing}
 ```
 
@@ -345,7 +381,7 @@ not mention or quote them):
         body = if c.body.trim().is_empty() { "(none)" } else { c.body.trim() },
         api = if api.is_empty() { "(none)\n".into() } else { api },
         existing = if existing.trim().is_empty() { "(not available)" } else { existing },
-        tests = capped(tests_patch, MAX_PROMPT_PATCH), feedback = feedback)
+        tests = capped(tests_patch, MAX_PROMPT_PATCH), feedback = feedback, lang = lang, fence = fence)
 }
 
 /// The issue in a writer's reply: a whole reply wrapped in one ```markdown
@@ -473,6 +509,12 @@ pub const MAX_API_CONTEXT: usize = 60_000;
 /// block per file, capped at MAX_API_CONTEXT bytes.
 pub fn parent_api(repo: &Path, t: &Task) -> Result<String> {
     let mut out = String::new();
+    if !t.is_go() {
+        // No declaration scanner for other languages: the parent's source
+        // of the touched files' directories, capped.
+        let whole: String = parent_sources(repo, t)?.iter().map(|(p, s)| format!("// ==== {p}\n{s}\n")).collect();
+        return Ok(capped(&whole, MAX_API_CONTEXT));
+    }
     for (path, src) in parent_sources(repo, t)? {
         let decls = scan::exported_api(&src, &path);
         if decls.is_empty() {
@@ -489,14 +531,27 @@ pub fn parent_api(repo: &Path, t: &Task) -> Result<String> {
     Ok(out)
 }
 
-/// (path, text) of the non-test Go files of the task's packages at the parent.
+/// (path, text) of the non-test Go files of the task's packages at the parent
+/// (for other toolchains: the source files, by the toolchain's own
+/// classification, in the directories of the fix's files).
 pub fn parent_sources(repo: &Path, t: &Task) -> Result<Vec<(String, String)>> {
     let parent = &t.rec.cand.parent;
     let mut out = Vec::new();
-    for dir in t.package_dirs() {
+    let dirs: Vec<String> = if t.is_go() { t.package_dirs() } else {
+        let d: std::collections::BTreeSet<String> = t.rec.cand.src_files.iter().map(|f| crate::dir_of(f)).collect();
+        d.into_iter().collect()
+    };
+    let is_source = |dir: &str, name: &str| if t.is_go() { name.ends_with(".go") && !name.ends_with("_test.go") } else {
+        let path = if dir.is_empty() { name.to_string() } else { format!("{dir}/{name}") };
+        toolchain::classify_file(Some(t.toolchain()), &path) == FileKind::Source
+    };
+    for dir in dirs {
         let spec = if dir.is_empty() { parent.clone() } else { format!("{parent}:{dir}") };
-        let Ok(list) = crate::git(repo, &["ls-tree", "--name-only", &spec]) else { continue };
-        for name in list.lines().filter(|n| n.ends_with(".go") && !n.ends_with("_test.go")) {
+        let Ok(list) = crate::git(repo, &["ls-tree", &spec]) else { continue };
+        // "<mode> blob <id>\t<name>": files only, never subdirectories.
+        let blobs = list.lines().filter_map(|l| l.split_once('\t'))
+            .filter(|(meta, _)| meta.contains(" blob ")).map(|(_, n)| n);
+        for name in blobs.filter(|n| is_source(&dir, n)) {
             let path = if dir.is_empty() { name.to_string() } else { format!("{dir}/{name}") };
             out.push((path.clone(), crate::git(repo, &["show", &format!("{parent}:{path}")])?));
         }
@@ -504,12 +559,12 @@ pub fn parent_sources(repo: &Path, t: &Task) -> Result<Vec<(String, String)>> {
     Ok(out)
 }
 
-pub fn probe_prompt(instruction: &str, api: &str) -> String {
+pub fn probe_prompt(instruction: &str, api: &str, lang: &str) -> String {
     format!("\
 You are reviewing a problem statement before it is given to a developer. The
 developer will see ONLY this statement and the repository (whose existing
 exported API for the affected packages is listed below). Judge whether a
-competent Go developer could implement exactly what is asked, with the exact
+competent {lang} developer could implement exactly what is asked, with the exact
 names and signatures other code will call, WITHOUT guessing.
 
 Answer with ONE JSON object and nothing else:
@@ -540,7 +595,8 @@ pub fn probe(repo: &Path, t: &Task, llm: &Copilot) -> Result<Step> {
     }
     let instruction = t.read(INSTRUCTION)?;
     let api = parent_api(repo, t)?;
-    let reply = llm.complete(&probe_prompt(&instruction, &api))?;
+    let lang = toolchain::language(t.rec.cand.toolchain.as_deref()).0;
+    let reply = llm.complete(&probe_prompt(&instruction, &api, lang))?;
     let p = match scan::parse_probe(&reply) {
         Ok(p) => p,
         Err(e) => return Ok(Step::Retry(format!("unparseable reviewer reply: {e}"))),
@@ -652,6 +708,14 @@ pub struct ExamTask {
     pub module_root: String,
     pub packages: Vec<String>,
     pub instruction: String,
+    /// Which toolchain validates an answer (`go`, `python`, `bazel`, ...).
+    /// Task records mined before toolchains existed have none: they are Go.
+    #[serde(default = "default_toolchain")]
+    pub toolchain: String,
+}
+
+fn default_toolchain() -> String {
+    "go".to_string()
 }
 
 /// The exam-ready tasks under `tasks_dir`, judged afresh from the verdicts.
@@ -664,7 +728,8 @@ pub fn load_exam(tasks_dir: &Path) -> Result<Vec<ExamTask>> {
         let c = &t.rec.cand;
         out.push(ExamTask { sha: c.sha.clone(), sha12: t.short().to_string(), parent: c.parent.clone(),
                             module_root: c.module_root.clone(), packages: c.packages.clone(),
-                            instruction: t.read(INSTRUCTION)? });
+                            instruction: t.read(INSTRUCTION)?,
+                            toolchain: c.toolchain.clone().unwrap_or_else(default_toolchain) });
     }
     Ok(out)
 }
@@ -694,7 +759,8 @@ mod tests {
                               subject: "box: report when full".into(), body: String::new(),
                               module_root: "m".into(), packages: vec!["./pkg/box".into()],
                               src_files: vec!["m/pkg/box/box.go".into()],
-                              test_files: vec!["m/pkg/box/box_test.go".into()], src_churn: 4 },
+                              test_files: vec!["m/pkg/box/box_test.go".into()], src_churn: 4,
+                              toolchain: None },
             valid, reason: if valid { "ok".into() } else { "tests already pass on parent".into() },
             fails_before: None, passes_after: None, parent_outcome: Some(Outcome::BuildFail),
             commit_outcome: Some(Outcome::Pass), detail: None, seconds: 1.0 };
@@ -780,6 +846,38 @@ mod tests {
     }
 
     #[test]
+    fn a_python_task_shows_its_parent_source_in_python_terms() {
+        let d = tempfile::tempdir().unwrap();
+        let r = d.path().join("repo");
+        std::fs::create_dir_all(r.join("proj/pkg/sub")).unwrap();
+        let run = |args: &[&str]| assert!(std::process::Command::new("git").args(args).current_dir(&r)
+            .env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@example.invalid")
+            .env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@example.invalid")
+            .status().unwrap().success());
+        std::fs::write(r.join("proj/pkg/core.py"), "def one():\n    return 1\n").unwrap();
+        std::fs::write(r.join("proj/pkg/test_core.py"), "").unwrap();
+        std::fs::write(r.join("proj/pkg/sub/x.py"), "").unwrap();
+        run(&["init", "-q"]);
+        run(&["add", "-A"]);
+        run(&["commit", "-qm", "base"]);
+        let parent = crate::git(&r, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        let mut t = task(&d.path().join("tasks"), "aaaaaaaaaaaa", true);
+        t.rec.cand = Candidate { parent, module_root: "proj".into(), packages: vec!["./pkg/test_core.py".into()],
+                                 src_files: vec!["proj/pkg/core.py".into()],
+                                 test_files: vec!["proj/pkg/test_core.py".into()],
+                                 toolchain: Some("python".into()), ..t.rec.cand.clone() };
+        let src = parent_sources(&r, &t).unwrap();
+        assert_eq!(src.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), ["proj/pkg/core.py"],
+                   "source files only: no tests, no subdirectories");
+        assert_eq!(t.package_dirs(), ["proj/pkg"]);
+        assert_eq!(t.graded_tests().unwrap(), TESTS, "a non-Go tests.patch is graded whole");
+        let prompt = describe_prompt(&t, "", &src[0].1, &[], "");
+        assert!(prompt.contains("in a Python repository") && prompt.contains("```python\ndef one()"), "{prompt}");
+        assert!(probe_prompt("# x", "", "Python").contains("competent Python developer"));
+        assert!(parent_api(&r, &t).unwrap().contains("def one()"));
+    }
+
+    #[test]
     fn a_reply_is_cut_to_the_issue() {
         assert_eq!(unfence("Not present locally; writing from the spec.\n\n# Title\n\nBody"), "# Title\n\nBody");
         assert_eq!(unfence("```markdown\n# Title\nBody\n```"), "# Title\nBody");
@@ -814,6 +912,82 @@ mod tests {
         assert_eq!(gate_of(&invalid).failing[0].stage, "valid");
     }
 
+    /// A toolchain with one shared prefetch slot that records every call.
+    struct SharedSlot {
+        events: std::sync::Arc<Mutex<Vec<String>>>,
+    }
+
+    impl crate::Toolchain for SharedSlot {
+        fn name(&self) -> &'static str { "go" }
+        fn is_root_marker(&self, _: &str) -> bool { false }
+        fn classify_file(&self, _: &str) -> crate::toolchain::FileKind { crate::toolchain::FileKind::Other }
+        fn project_root(&self, _: &crate::toolchain::Changed) -> Option<String> { None }
+        fn units(&self, _: &crate::toolchain::Changed, _: &str, _: &dyn Fn(&str) -> Result<String>) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+        fn prefetch_label(&self) -> &'static str { "prefetch" }
+        fn test_label(&self, _: &[String]) -> String { String::new() }
+        fn prefetch_before_each_run(&self) -> bool { true }
+        fn prefetch(&self, _: &Path, cand: &Candidate) -> Result<(bool, String)> {
+            self.events.lock().unwrap().push(format!("pre:{}", cand.sha));
+            // Long enough that an unguarded concurrent task would interleave.
+            std::thread::sleep(Duration::from_millis(20));
+            Ok((true, String::new()))
+        }
+        fn run_tests(&self, _: &Path, cand: &Candidate) -> Result<(Outcome, String)> {
+            std::thread::sleep(Duration::from_millis(20));
+            self.events.lock().unwrap().push(format!("run:{}", cand.sha));
+            Ok((Outcome::Pass, String::new()))
+        }
+    }
+
+    #[test]
+    fn concurrent_flake_runs_never_share_a_prefetch_slot() {
+        // Review (P1): flake prefetched once and ran tasks concurrently, so
+        // with Bazel's single output base one task's prefetch could replace
+        // another's before its offline run. Every run must directly follow
+        // its own task's prefetch.
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").args(args).current_dir(repo.path())
+                .env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@example.invalid")
+                .env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@example.invalid")
+                .output().unwrap();
+            assert!(out.status.success());
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-q"]);
+        let mut shas = vec![];
+        for i in 0..2 {
+            std::fs::write(repo.path().join("f.txt"), format!("{i}\n")).unwrap();
+            git(&["add", "-A"]);
+            git(&["commit", "-qm", "c"]);
+            shas.push(git(&["rev-parse", "HEAD"]));
+        }
+        let tasks_dir = tempfile::tempdir().unwrap();
+        let tasks: Vec<Task> = shas.iter().enumerate().map(|(i, sha)| {
+            let mut t = task(tasks_dir.path(), &format!("{i}{}", "a".repeat(11)), true);
+            t.rec.cand.sha = sha.clone();
+            t
+        }).collect();
+        let events = std::sync::Arc::new(Mutex::new(vec![]));
+        let tcs = crate::Toolchains { all: vec![Box::new(SharedSlot { events: events.clone() })] };
+        std::thread::scope(|s| {
+            for t in &tasks {
+                let (repo, tcs) = (repo.path(), &tcs);
+                s.spawn(move || flake(repo, t, tcs, 2).unwrap());
+            }
+        });
+        let events = events.lock().unwrap().clone();
+        assert_eq!(events.iter().filter(|e| e.starts_with("run:")).count(), 4, "{events:?}");
+        for (i, e) in events.iter().enumerate() {
+            if let Some(sha) = e.strip_prefix("run:") {
+                assert_eq!(events[i - 1], format!("pre:{sha}"),
+                           "run {i} did not directly follow its own prefetch: {events:?}");
+            }
+        }
+    }
+
     #[test]
     fn exam_lists_only_ready_tasks_with_their_statement() {
         let d = tempfile::tempdir().unwrap();
@@ -826,6 +1000,9 @@ mod tests {
         let exam = load_exam(d.path()).unwrap();
         assert_eq!(exam.len(), 1);
         assert_eq!((exam[0].sha12.as_str(), exam[0].instruction.as_str()), ("aaaaaaaaaaaa", "# Do the thing\n"));
+        // Review (P2): consumers must be able to pick the validating
+        // toolchain; records from before toolchains existed are Go.
+        assert_eq!(exam[0].toolchain, "go");
         let tasks = load_tasks(d.path(), None).unwrap();
         run_stage("gate", &tasks, 2, false, gate).unwrap();
         let gates = write_exam(d.path(), &tasks).unwrap();

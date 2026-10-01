@@ -16,7 +16,9 @@
 //!
 //! ```text
 //! import rrsi_mine
-//! rrsi_mine.list_candidates("/path/to/repo", "2026-06-01") -> list[dict]
+//! rrsi_mine.list_candidates("/path/to/repo", "2026-06-01", toolchain="go") -> list[dict]
+//!                   (toolchain: go, python, bazel or auto; cpp is stubbed and raises;
+//!                    listing runs no container)
 //! rrsi_mine.export_tree(repo, sha, dest)
 //! rrsi_mine.apply_patch(tree, patch) -> str | None   (error text, or None)
 //! rrsi_mine.go_test(tree, module_root, packages, image=..., modcache=...,
@@ -35,9 +37,16 @@ fn err(e: anyhow::Error) -> PyErr {
     PyRuntimeError::new_err(format!("{e:#}"))
 }
 
+/// Toolchains with the CLI's default settings: enough for listing.
+fn listing_toolchains() -> crate::Toolchains {
+    crate::toolchain::settings::Settings::default().toolchains(600, vec![])
+}
+
 #[pyfunction]
-fn list_candidates(py: Python<'_>, repo: &str, since: &str) -> PyResult<PyObject> {
-    let cands = py.allow_threads(|| crate::candidates(Path::new(repo), since)).map_err(err)?;
+#[pyo3(signature = (repo, since, toolchain = "go"))]
+fn list_candidates(py: Python<'_>, repo: &str, since: &str, toolchain: &str) -> PyResult<PyObject> {
+    let cands = py.allow_threads(|| crate::history::candidates_for(&listing_toolchains(), Path::new(repo), since, toolchain))
+        .map_err(err)?;
     let json = serde_json::to_string(&cands).map_err(|e| err(e.into()))?;
     let loads = PyModule::import(py, "json")?.getattr("loads")?;
     Ok(loads.call1((json,))?.unbind())

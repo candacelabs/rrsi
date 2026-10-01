@@ -18,12 +18,14 @@ use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use rrsi_mine::fairness::{self as fair, Task};
 use rrsi_mine::llm::{Copilot, ProcessRunner};
-use rrsi_mine::{candidates, miner, mine, Docker};
+use rrsi_mine::toolchain::settings::{Settings, ToolchainChoice};
+use rrsi_mine::toolchain::Toolchains;
+use rrsi_mine::{history, miner, mine};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[derive(Parser)]
-#[command(version, about = "Mine FAIL_TO_PASS-validated Go tasks from git history; run any registered miner (`rrsi-mine miners`)")]
+#[command(version, about = "Mine FAIL_TO_PASS-validated tasks (Go, Python, Bazel) from git history; run any registered miner (`rrsi-mine miners`)")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -37,6 +39,10 @@ enum Cmd {
         repo: PathBuf,
         #[arg(long, default_value = "2026-06-01")]
         since: String,
+        #[command(flatten)]
+        tc: ToolchainChoice,
+        #[command(flatten)]
+        go: GoArgs,
     },
     /// Validate candidates in containers and write the task directory.
     Mine {
@@ -50,6 +56,8 @@ enum Cmd {
         jobs: usize,
         #[arg(long, default_value_t = 0)]
         limit: usize,
+        #[command(flatten)]
+        tc: ToolchainChoice,
         #[command(flatten)]
         go: GoArgs,
     },
@@ -146,12 +154,16 @@ struct GoArgs {
     buildcache: String,
     #[arg(long, env = "RRSI_GO_TEST_TIMEOUT", default_value_t = 600)]
     test_timeout: u64,
+    #[command(flatten)]
+    others: Settings,
 }
 
 impl GoArgs {
-    fn docker(&self) -> Docker<'_> {
-        Docker { image: &self.image, modcache: &self.modcache, buildcache: &self.buildcache,
-                 test_timeout: self.test_timeout }
+    fn toolchains(&self) -> Toolchains {
+        let mut go = self.others.config("go", self.test_timeout).expect("go is registered");
+        go.sandbox.image = self.image.clone();
+        go.volumes = vec![self.modcache.clone(), self.buildcache.clone()];
+        self.others.toolchains(self.test_timeout, vec![("go", go)])
     }
 }
 
@@ -193,23 +205,25 @@ fn gate(s: &StageArgs, tasks: &[Task]) -> Result<()> {
 
 fn main() -> Result<()> {
     match Cli::parse().cmd {
-        Cmd::List { repo, since } => {
-            for c in candidates(&repo, &since)? {
+        Cmd::List { repo, since, tc, go } => {
+            let tcs = go.toolchains();
+            for c in history::candidates_for(&tcs, &repo, &since, &tc.toolchain)? {
                 println!("{}", serde_json::to_string(&c)?);
             }
         }
-        Cmd::Mine { repo, out, since, jobs, limit, go } => {
+        Cmd::Mine { repo, out, since, jobs, limit, tc, go } => {
             let repo = repo.canonicalize().context("--repo")?;
-            let mut cands = candidates(&repo, &since)?;
+            let tcs = go.toolchains();
+            let mut cands = history::candidates_for(&tcs, &repo, &since, &tc.toolchain)?;
             if limit > 0 {
                 cands.truncate(limit);
             }
-            mine(&repo, &out, cands, jobs, &go.docker())?;
+            mine(&repo, &out, cands, jobs, &tcs)?;
         }
         Cmd::Flake { stage, repo, runs, go } => {
-            let (repo, docker) = (canonical(&repo)?, go.docker());
+            let (repo, tcs) = (canonical(&repo)?, go.toolchains());
             fair::run_stage("flake", &load(&stage)?, stage.jobs, stage.force,
-                            |t| fair::flake(&repo, t, &docker, runs))?;
+                            |t| fair::flake(&repo, t, &tcs, runs))?;
         }
         Cmd::Api { stage } => fair::run_stage("api", &load(&stage)?, stage.jobs, stage.force, fair::api)?,
         Cmd::Describe { stage, repo, llm } => {
@@ -242,11 +256,11 @@ fn main() -> Result<()> {
         Cmd::Fairness { stage, repo, runs, go, llm } => {
             anyhow::ensure!(llm.describe_model != llm.probe_model,
                             "the reviewer must be a different model from the writer");
-            let (repo, docker) = (canonical(&repo)?, go.docker());
+            let (repo, tcs) = (canonical(&repo)?, go.toolchains());
             let (writer, reviewer) = (llm.copilot(&llm.describe_model), llm.copilot(&llm.probe_model));
             let tasks = load(&stage)?;
             let (j, f) = (stage.jobs, stage.force);
-            fair::run_stage("flake", &tasks, j, f, |t| fair::flake(&repo, t, &docker, runs))?;
+            fair::run_stage("flake", &tasks, j, f, |t| fair::flake(&repo, t, &tcs, runs))?;
             fair::run_stage("api", &tasks, j, f, fair::api)?;
             fair::run_stage("describe", &tasks, j, f, |t| fair::describe(Some(&repo), t, &writer))?;
             fair::run_stage("probe", &tasks, j, f, |t| fair::probe(&repo, t, &reviewer))?;

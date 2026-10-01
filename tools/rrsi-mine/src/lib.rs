@@ -12,19 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Mine SWE-style Go tasks from a repository's own history.
+//! Mine SWE-style tasks from a repository's own history.
 //!
-//! A task is one commit that changes Go source and the tests of the same
-//! package. It is valid only if the commit's tests FAIL on the parent tree and
-//! PASS on the commit tree (SWE-bench's FAIL_TO_PASS check), both run in a
-//! network-less `golang` container with shared module and build caches.
+//! A task is one commit that changes source and the tests of that source.
+//! It is valid only if the commit's tests FAIL on the parent tree and PASS on
+//! the commit tree (SWE-bench's FAIL_TO_PASS check), both run in a
+//! network-less container after a networked step that prefetches the
+//! dependencies. What "source", "tests" and "a run" mean is a toolchain's
+//! business (src/toolchain): Go (`go test` in a `golang` container, the
+//! default), Python (pytest) and Bazel (`bazel test`); C++ is registered but
+//! stubbed (kaashmonee/candace-server#273).
 //!
 //! The `rrsi-mine` binary (src/main.rs) and the `rrsi_mine` Python module
 //! (src/python.rs, feature `python`) are thin fronts over this library:
 //!
 //! ```text
-//! rrsi-mine list --repo PATH [--since 2026-06-01]
-//! rrsi-mine mine --repo PATH --out DIR [--since ...] [--jobs 4] [--limit N]
+//! rrsi-mine list --repo PATH [--since 2026-06-01] [--toolchain go|python|cpp|bazel|auto]
+//! rrsi-mine mine --repo PATH --out DIR [--since ...] [--jobs 4] [--limit N] [--toolchain ...]
 //! ```
 //!
 //! `mine` writes DIR/<sha12>/{task.json, src.patch, tests.patch, parent.log,
@@ -70,6 +74,10 @@ pub struct Candidate {
     pub src_files: Vec<String>,
     pub test_files: Vec<String>,
     pub src_churn: u64,
+    /// The toolchain that validates this candidate (`python`, `cpp`,
+    /// `bazel`); absent means Go, so every earlier task.json still reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toolchain: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -183,6 +191,17 @@ pub fn decide(parent: Outcome, commit: Outcome) -> (bool, &'static str) {
     }
 }
 
+/// The verdict the parent run alone decides, if any: a parent that passes,
+/// or that proved nothing (Infra, Timeout), makes the commit run pointless.
+/// Same reasons as [`decide`].
+pub fn decide_parent(parent: Outcome) -> Option<(bool, &'static str)> {
+    use Outcome::*;
+    match parent {
+        Infra | Timeout | Pass => Some(decide(parent, Pass)),
+        TestFail | BuildFail => None,
+    }
+}
+
 pub struct Docker<'a> {
     pub image: &'a str,
     pub modcache: &'a str,
@@ -264,9 +283,22 @@ pub fn candidates(repo: &Path, since: &str) -> Result<Vec<Candidate>> {
             src_files: src.into_iter().map(|(_, f)| f).collect(),
             test_files: tests,
             src_churn: churn,
+            toolchain: None,
         });
     }
     Ok(out)
+}
+
+static SHARED_PREFETCH: Mutex<()> = Mutex::new(());
+
+/// Exclusive use of the shared prefetch slot for toolchains that have one
+/// (Bazel's single output base: one tree's prefetch replaces another's).
+/// Every stage that prefetches and then runs offline (validation and the
+/// fairness flake stage) holds this for the whole prefetch-and-run sequence,
+/// so no other task's prefetch can land in between. `None` for toolchains
+/// whose prefetches never interfere.
+pub fn shared_prefetch_guard(tc: &dyn Toolchain) -> Option<std::sync::MutexGuard<'static, ()>> {
+    tc.prefetch_before_each_run().then(|| SHARED_PREFETCH.lock().unwrap_or_else(|p| p.into_inner()))
 }
 
 pub fn export_tree(repo: &Path, sha: &str, dest: &Path) -> Result<()> {
@@ -335,7 +367,8 @@ pub fn apply_patch(tree: &Path, patch: &str) -> Result<Option<String>> {
     Ok(if out.status.success() { None } else { Some(String::from_utf8_lossy(&out.stderr).into_owned()) })
 }
 
-pub fn validate(repo: &Path, out: &Path, cand: &Candidate, docker: &Docker) -> Result<TaskRecord> {
+pub fn validate(repo: &Path, out: &Path, cand: &Candidate, tc: &dyn Toolchain) -> Result<TaskRecord> {
+    tc.check()?;
     let tdir = out.join(&cand.sha[..12]);
     let task_json = tdir.join("task.json");
     if task_json.is_file() {
@@ -352,6 +385,7 @@ pub fn validate(repo: &Path, out: &Path, cand: &Candidate, docker: &Docker) -> R
     std::fs::write(tdir.join("tests.patch"), &tests_patch)?;
     std::fs::write(tdir.join("src.patch"), diff(&cand.src_files)?)?;
 
+    let _serial = shared_prefetch_guard(tc);
     let work = tempfile::Builder::new().prefix("rrsi-mine-").tempdir()?;
     let (parent, commit) = (work.path().join("parent"), work.path().join("commit"));
     export_tree(repo, &cand.parent, &parent)?;
@@ -366,30 +400,60 @@ pub fn validate(repo: &Path, out: &Path, cand: &Candidate, docker: &Docker) -> R
         let short = &cand.sha[..12];
         let mut infra = None;
         for (name, tree) in [("parent", &parent), ("commit", &commit)] {
-            println!("[mine]   {short} {name}: go mod download");
-            let (ok, log) = docker.download(tree, &cand.module_root)?;
+            println!("[mine]   {short} {name}: {}", tc.prefetch_label());
+            let (ok, log) = tc.prefetch(tree, cand)?;
             if !ok {
-                infra = Some(format!("{name}: go mod download failed: {}",
+                infra = Some(format!("{name}: {} failed: {}", tc.prefetch_label(),
                                      log.chars().rev().take(300).collect::<String>().chars().rev().collect::<String>()));
             }
         }
-        println!("[mine]   {short} parent: go test {}", cand.packages.join(" "));
-        let (parent_out, parent_log) = docker.go_test(&parent, &cand.module_root, &cand.packages)?;
-        println!("[mine]   {short} parent: {parent_out:?}");
-        std::fs::write(tdir.join("parent.log"), parent_log)?;
-        println!("[mine]   {short} commit: go test {}", cand.packages.join(" "));
-        let (commit_out, commit_log) = docker.go_test(&commit, &cand.module_root, &cand.packages)?;
-        println!("[mine]   {short} commit: {commit_out:?}");
-        std::fs::write(tdir.join("commit.log"), commit_log)?;
-        let (valid, reason) = decide(parent_out, commit_out);
-        rec.valid = valid;
-        rec.reason = reason.into();
-        rec.parent_outcome = Some(parent_out);
-        rec.commit_outcome = Some(commit_out);
-        rec.fails_before = Some(matches!(parent_out, Outcome::TestFail | Outcome::BuildFail));
-        rec.passes_after = Some(commit_out == Outcome::Pass);
-        if infra.is_some() {
+        // The units the tests run as, resolved on the commit tree (a CTest
+        // name, a Bazel label); Go and Python keep the listed ones.
+        let units = tc.resolve_units(&commit, cand)?;
+        if units.is_empty() {
+            rec.reason = "no test unit runs the changed tests".into();
             rec.detail = infra;
+        } else {
+            if units != cand.packages {
+                println!("[mine]   {short} units: {}", units.join(" "));
+                rec.cand.packages = units;
+            }
+            let cand = &rec.cand.clone();
+            let refetch = |name: &str, tree: &Path| -> Result<()> {
+                if tc.prefetch_before_each_run() {
+                    println!("[mine]   {short} {name}: {} (again, right before the run)", tc.prefetch_label());
+                    tc.prefetch(tree, cand)?;
+                }
+                Ok(())
+            };
+            refetch("parent", &parent)?;
+            println!("[mine]   {short} parent: {}", tc.test_label(&cand.packages));
+            let (parent_out, parent_log) = tc.run_tests(&parent, cand)?;
+            println!("[mine]   {short} parent: {parent_out:?}");
+            std::fs::write(tdir.join("parent.log"), parent_log)?;
+            rec.parent_outcome = Some(parent_out);
+            rec.fails_before = Some(matches!(parent_out, Outcome::TestFail | Outcome::BuildFail));
+            // Parent first: when the parent run already decides the task
+            // (it passed, or proved nothing), the commit is never run.
+            if let Some((valid, reason)) = decide_parent(parent_out) {
+                println!("[mine]   {short} commit: skipped ({reason})");
+                rec.valid = valid;
+                rec.reason = reason.into();
+            } else {
+                refetch("commit", &commit)?;
+                println!("[mine]   {short} commit: {}", tc.test_label(&cand.packages));
+                let (commit_out, commit_log) = tc.run_tests(&commit, cand)?;
+                println!("[mine]   {short} commit: {commit_out:?}");
+                std::fs::write(tdir.join("commit.log"), commit_log)?;
+                let (valid, reason) = decide(parent_out, commit_out);
+                rec.valid = valid;
+                rec.reason = reason.into();
+                rec.commit_outcome = Some(commit_out);
+                rec.passes_after = Some(commit_out == Outcome::Pass);
+            }
+            if infra.is_some() {
+                rec.detail = infra;
+            }
         }
     }
     rec.seconds = (t0.elapsed().as_secs_f64() * 10.0).round() / 10.0;
@@ -426,7 +490,7 @@ pub fn enclosing_work_tree(path: &Path) -> Option<PathBuf> {
     abs.ancestors().find(|a| a.join(".git").exists()).map(Path::to_path_buf)
 }
 
-pub fn mine(repo: &Path, out: &Path, cands: Vec<Candidate>, jobs: usize, docker: &Docker) -> Result<()> {
+pub fn mine(repo: &Path, out: &Path, cands: Vec<Candidate>, jobs: usize, tcs: &Toolchains) -> Result<()> {
     if let Some(tree) = enclosing_work_tree(out) {
         bail!("refusing to write mined tasks to {} inside the git work tree {}: \
                they contain repository source", out.display(), tree.display());
@@ -442,7 +506,7 @@ pub fn mine(repo: &Path, out: &Path, cands: Vec<Candidate>, jobs: usize, docker:
                 let i = next.fetch_add(1, Ordering::SeqCst);
                 let Some(c) = cands.get(i) else { break };
                 println!("[mine] start {} {}", &c.sha[..12], c.subject.chars().take(60).collect::<String>());
-                let res = validate(repo, out, c, docker);
+                let res = tcs.for_candidate(c).and_then(|tc| validate(repo, out, c, tc));
                 let n = done.fetch_add(1, Ordering::SeqCst) + 1;
                 match res {
                     Ok(r) => {
@@ -460,21 +524,29 @@ pub fn mine(repo: &Path, out: &Path, cands: Vec<Candidate>, jobs: usize, docker:
     let mut valid = 0;
     for r in results.iter().flatten() {
         valid += r.valid as usize;
-        writeln!(index, "{}", serde_json::json!({
+        let mut line = serde_json::json!({
             "sha": r.cand.sha, "valid": r.valid, "reason": r.reason,
             "module_root": r.cand.module_root, "packages": r.cand.packages,
-            "src_churn": r.cand.src_churn, "subject": r.cand.subject}))?;
+            "src_churn": r.cand.src_churn, "subject": r.cand.subject});
+        if let Some(t) = &r.cand.toolchain {
+            line["toolchain"] = t.clone().into();
+        }
+        writeln!(index, "{line}")?;
     }
     println!("[mine] valid {valid}/{}", results.iter().flatten().count());
     Ok(())
 }
 
 pub mod fairness;
+pub mod history;
 pub mod llm;
 pub mod scan;
 pub mod miner;
 pub mod miners;
+pub mod toolchain;
 pub mod transcript;
+
+pub use toolchain::{Toolchain, Toolchains};
 
 #[cfg(feature = "python")]
 mod python;
@@ -572,8 +644,8 @@ mod tests {
         assert_eq!(enclosing_work_tree(&inside).as_deref(), Some(d.path()));
         let outside = tempfile::tempdir().unwrap();
         assert!(enclosing_work_tree(&outside.path().join("tasks")).is_none());
-        let docker = Docker { image: "unused", modcache: "unused", buildcache: "unused", test_timeout: 1 };
-        let err = mine(d.path(), &inside, vec![], 1, &docker).unwrap_err();
+        let tcs = Toolchains { all: vec![] };
+        let err = mine(d.path(), &inside, vec![], 1, &tcs).unwrap_err();
         assert!(format!("{err}").contains("inside the git work tree"));
         assert!(!inside.exists(), "nothing may be created inside the work tree");
     }
@@ -585,7 +657,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let cand = Candidate { sha: "a".repeat(40), parent: "b".repeat(40), subject: "s".into(),
                                body: String::new(), module_root: "m".into(), packages: vec![],
-                               src_files: vec![], test_files: vec![], src_churn: 1 };
+                               src_files: vec![], test_files: vec![], src_churn: 1, toolchain: None };
         let rec = |parent, commit| TaskRecord {
             cand: cand.clone(), valid: false, reason: String::new(), fails_before: None,
             passes_after: None, parent_outcome: Some(parent), commit_outcome: Some(commit),
@@ -599,6 +671,88 @@ mod tests {
         let fresh = tempfile::tempdir().unwrap();
         write_record(fresh.path(), &rec(Outcome::TestFail, Outcome::Pass)).unwrap();
         assert!(fresh.path().join("task.json").is_file());
+    }
+
+    #[test]
+    fn the_parent_decides_alone_only_when_it_passed_or_proved_nothing() {
+        use Outcome::*;
+        assert_eq!(decide_parent(Pass), Some((false, "tests already pass on parent")));
+        assert_eq!(decide_parent(Infra).map(|d| d.0), Some(false));
+        assert_eq!(decide_parent(Timeout), Some((false, "timeout: a run was killed")));
+        assert_eq!(decide_parent(TestFail), None);
+        assert_eq!(decide_parent(BuildFail), None);
+    }
+
+    /// A toolchain whose runs are scripted; it counts runs per tree.
+    struct Scripted {
+        parent: Outcome,
+        runs: Mutex<Vec<String>>,
+    }
+
+    impl Toolchain for Scripted {
+        fn name(&self) -> &'static str { "go" }
+        fn is_root_marker(&self, _: &str) -> bool { false }
+        fn classify_file(&self, _: &str) -> toolchain::FileKind { toolchain::FileKind::Other }
+        fn project_root(&self, _: &toolchain::Changed) -> Option<String> { None }
+        fn units(&self, _: &toolchain::Changed, _: &str, _: &dyn Fn(&str) -> Result<String>) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+        fn prefetch_label(&self) -> &'static str { "prefetch" }
+        fn test_label(&self, _: &[String]) -> String { "test".into() }
+        fn prefetch(&self, _: &Path, _: &Candidate) -> Result<(bool, String)> { Ok((true, String::new())) }
+        fn run_tests(&self, tree: &Path, _: &Candidate) -> Result<(Outcome, String)> {
+            let which = tree.file_name().unwrap().to_string_lossy().into_owned();
+            self.runs.lock().unwrap().push(which.clone());
+            Ok((if which == "parent" { self.parent } else { Outcome::Pass }, String::new()))
+        }
+    }
+
+    // Regression, 2026-10-01: every candidate built and tested the commit
+    // tree even when the parent run had already decided the task.
+    #[test]
+    fn a_parent_that_passes_never_runs_the_commit() {
+        let d = tempfile::tempdir().unwrap();
+        let r = d.path().join("repo");
+        std::fs::create_dir_all(&r).unwrap();
+        let run = |args: &[&str]| assert!(Command::new("git").args(args).current_dir(&r)
+            .env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@example.invalid")
+            .env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@example.invalid")
+            .status().unwrap().success());
+        run(&["init", "-q"]);
+        std::fs::write(r.join("a.go"), "package a\n").unwrap();
+        run(&["add", "-A"]);
+        run(&["commit", "-qm", "base"]);
+        std::fs::write(r.join("a_test.go"), "package a\n").unwrap();
+        run(&["add", "-A"]);
+        run(&["commit", "-qm", "test"]);
+        let sha = git(&r, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        let parent = git(&r, &["rev-parse", "HEAD^"]).unwrap().trim().to_string();
+        let cand = Candidate { sha, parent, subject: "s".into(), body: String::new(), module_root: String::new(),
+                               packages: vec!["./".into()], src_files: vec!["a.go".into()],
+                               test_files: vec!["a_test.go".into()], src_churn: 1, toolchain: None };
+        for (parent_out, runs, reason) in [(Outcome::Pass, 1, "tests already pass on parent"),
+                                           (Outcome::BuildFail, 2, "ok")] {
+            let out = d.path().join(format!("tasks-{parent_out:?}"));
+            let tc = Scripted { parent: parent_out, runs: Mutex::new(vec![]) };
+            let rec = validate(&r, &out, &cand, &tc).unwrap();
+            assert_eq!(rec.reason, reason);
+            assert_eq!(tc.runs.lock().unwrap().len(), runs, "{parent_out:?}: {:?}", tc.runs.lock().unwrap());
+            if runs == 1 {
+                assert!(rec.commit_outcome.is_none() && !out.join(&cand.sha[..12]).join("commit.log").exists());
+            }
+        }
+    }
+
+    #[test]
+    fn task_json_without_a_toolchain_is_a_go_task_and_go_writes_none() {
+        let old = r#"{"sha":"a","parent":"b","subject":"s","body":"","module_root":"m","packages":["./p"],
+                      "src_files":[],"test_files":[],"src_churn":1,"valid":true,"reason":"ok","seconds":1.0}"#;
+        let rec: TaskRecord = serde_json::from_str(old).unwrap();
+        assert_eq!(rec.cand.toolchain, None);
+        assert!(!serde_json::to_string(&rec).unwrap().contains("toolchain"), "Go output is unchanged");
+        let mut py = rec.cand.clone();
+        py.toolchain = Some("python".into());
+        assert!(serde_json::to_string(&py).unwrap().contains(r#""toolchain":"python""#));
     }
 
     #[test]
