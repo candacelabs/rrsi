@@ -532,8 +532,11 @@ pub fn parent_sources(repo: &Path, t: &Task) -> Result<Vec<(String, String)>> {
     };
     for dir in dirs {
         let spec = if dir.is_empty() { parent.clone() } else { format!("{parent}:{dir}") };
-        let Ok(list) = crate::git(repo, &["ls-tree", "--name-only", &spec]) else { continue };
-        for name in list.lines().filter(|n| is_source(&dir, n)) {
+        let Ok(list) = crate::git(repo, &["ls-tree", &spec]) else { continue };
+        // "<mode> blob <id>\t<name>": files only, never subdirectories.
+        let blobs = list.lines().filter_map(|l| l.split_once('\t'))
+            .filter(|(meta, _)| meta.contains(" blob ")).map(|(_, n)| n);
+        for name in blobs.filter(|n| is_source(&dir, n)) {
             let path = if dir.is_empty() { name.to_string() } else { format!("{dir}/{name}") };
             out.push((path.clone(), crate::git(repo, &["show", &format!("{parent}:{path}")])?));
         }
@@ -816,6 +819,38 @@ mod tests {
         let r = canned(&[leaky, leaky]);
         let Step::Verdict { pass, reason, .. } = describe(None, &t, &llm(&r)).unwrap() else { panic!() };
         assert!(!pass && reason.contains("leaks"), "{reason}");
+    }
+
+    #[test]
+    fn a_python_task_shows_its_parent_source_in_python_terms() {
+        let d = tempfile::tempdir().unwrap();
+        let r = d.path().join("repo");
+        std::fs::create_dir_all(r.join("proj/pkg/sub")).unwrap();
+        let run = |args: &[&str]| assert!(std::process::Command::new("git").args(args).current_dir(&r)
+            .env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@example.invalid")
+            .env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@example.invalid")
+            .status().unwrap().success());
+        std::fs::write(r.join("proj/pkg/core.py"), "def one():\n    return 1\n").unwrap();
+        std::fs::write(r.join("proj/pkg/test_core.py"), "").unwrap();
+        std::fs::write(r.join("proj/pkg/sub/x.py"), "").unwrap();
+        run(&["init", "-q"]);
+        run(&["add", "-A"]);
+        run(&["commit", "-qm", "base"]);
+        let parent = crate::git(&r, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        let mut t = task(&d.path().join("tasks"), "aaaaaaaaaaaa", true);
+        t.rec.cand = Candidate { parent, module_root: "proj".into(), packages: vec!["./pkg/test_core.py".into()],
+                                 src_files: vec!["proj/pkg/core.py".into()],
+                                 test_files: vec!["proj/pkg/test_core.py".into()],
+                                 toolchain: Some("python".into()), ..t.rec.cand.clone() };
+        let src = parent_sources(&r, &t).unwrap();
+        assert_eq!(src.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(), ["proj/pkg/core.py"],
+                   "source files only: no tests, no subdirectories");
+        assert_eq!(t.package_dirs(), ["proj/pkg"]);
+        assert_eq!(t.graded_tests().unwrap(), TESTS, "a non-Go tests.patch is graded whole");
+        let prompt = describe_prompt(&t, "", &src[0].1, &[], "");
+        assert!(prompt.contains("in a Python repository") && prompt.contains("```python\ndef one()"), "{prompt}");
+        assert!(probe_prompt("# x", "", "Python").contains("competent Python developer"));
+        assert!(parent_api(&r, &t).unwrap().contains("def one()"));
     }
 
     #[test]
