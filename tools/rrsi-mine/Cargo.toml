@@ -25,6 +25,18 @@ clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
+# CSF integration (src/csf): gitoxide reads trees and blobs at any revision
+# in-process; ripgrep's walker lists checkouts; go.mod and MODULE.bazel are
+# read by real parsers rather than string matching.
+gix = { version = "0.88", default-features = false, features = ["revision", "sha1"] }
+ignore = "0.4.33"
+gomod-parser = "0.5.3"
+starlark_syntax = "0.14.2"
+# csfc diagnostics (`file:line:col: CODE: message`) and a bounded csfc run.
+regex = "1"
+wait-timeout = "0.2"
+# rrsi-report renders its CSF section server-side (src/report/csf.rs).
+html-escape = "0.2.15"
 pyo3 = { version = "0.25", features = ["extension-module", "abi3-py310"], optional = true }
 
 [profile.release]

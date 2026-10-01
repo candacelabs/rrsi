@@ -23,13 +23,17 @@
 //! (src/python.rs, feature `python`) are thin fronts over this library:
 //!
 //! ```text
-//! rrsi-mine list --repo PATH [--since 2026-06-01]
+//! rrsi-mine list --repo PATH [--since 2026-06-01] [--rejected]
 //! rrsi-mine mine --repo PATH --out DIR [--since ...] [--jobs 4] [--limit N]
 //! ```
 //!
 //! `mine` writes DIR/<sha12>/{task.json, src.patch, tests.patch, parent.log,
-//! commit.log} and DIR/index.jsonl. It is resume-safe: a candidate with a
-//! task.json is kept. The output holds the repository's code: keep DIR out of
+//! commit.log}, DIR/index.jsonl and DIR/rejected.jsonl (every commit that was
+//! not a candidate, with the reason). It is resume-safe: a candidate with a
+//! task.json is kept. Generated files (src/csf/generated.rs) are never part
+//! of a task's source. In a CSF-instrumented repository (src/csf) each task
+//! also records the CSF components its fix touches and CSF's gates on the
+//! commit tree. The output holds the repository's code: keep DIR out of
 //! any public repository.
 //!
 //! The fairness stages (src/fairness.rs) then decide which valid tasks are
@@ -70,6 +74,16 @@ pub struct Candidate {
     pub src_files: Vec<String>,
     pub test_files: Vec<String>,
     pub src_churn: u64,
+    /// The CSF components the fix touches; absent outside CSF repositories.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub csf: Option<csf::map::TaskCsf>,
+}
+
+/// A commit that touched tests but is not a candidate, and why.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Rejection {
+    pub sha: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -88,6 +102,10 @@ pub struct TaskRecord {
     pub commit_outcome: Option<Outcome>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// CSF's gates on the commit tree (src/csf/guard.rs); absent outside
+    /// CSF repositories.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub csf_guards: Option<Vec<csf::guard::GuardVerdict>>,
     pub seconds: f64,
 }
 
@@ -223,12 +241,26 @@ pub fn relative_package(root: &str, pkg: &str) -> String {
     if rel.is_empty() { "./".to_string() } else { format!("./{rel}") }
 }
 
+/// The candidates of `repo` since `since`, generated files excluded.
 pub fn candidates(repo: &Path, since: &str) -> Result<Vec<Candidate>> {
+    Ok(scan(repo, since, &csf::MineCsf::default())?.0)
+}
+
+/// Every commit since `since` that touched a Go test: the candidates, and
+/// the rest with the reason each is not one. `csf` supplies declared
+/// generated roots and the component map (empty outside CSF repositories).
+pub fn scan(repo: &Path, since: &str, csf: &csf::MineCsf) -> Result<(Vec<Candidate>, Vec<Rejection>)> {
     let since_arg = format!("--since={since}");
     let log = git(repo, &["log", &since_arg, "--no-merges", "--format=%H", "--", "*_test.go"])?;
+    let gix_repo = gix::discover(repo).context("opening the repository")?;
     let mut out = Vec::new();
+    let mut rejected = Vec::new();
     for sha in log.split_whitespace() {
+        let mut reject = |reason: String| rejected.push(Rejection { sha: sha.to_string(), reason });
+        let (commit, parent) = (csf::source::Source::git_in(&gix_repo, sha)?,
+                                csf::source::Source::git_in(&gix_repo, &format!("{sha}^")).ok());
         let mut src: Vec<(u64, String)> = Vec::new();
+        let mut generated = 0;
         let mut tests: Vec<String> = Vec::new();
         for line in git(repo, &["show", "--numstat", "--format=", sha])?.lines() {
             let f: Vec<&str> = line.split('\t').collect();
@@ -238,7 +270,14 @@ pub fn candidates(repo: &Path, since: &str) -> Result<Vec<Candidate>> {
             let churn = f[0].parse::<u64>().unwrap_or(0) + f[1].parse::<u64>().unwrap_or(0);
             if f[2].ends_with("_test.go") {
                 tests.push(f[2].to_string());
-            } else if !GENERATED.iter().any(|g| f[2].contains(g)) {
+                continue;
+            }
+            // A deleted file is judged by its header on the parent.
+            let header = || commit.read(f[2]).ok().flatten()
+                .or_else(|| parent.as_ref().and_then(|p| p.read(f[2]).ok().flatten()));
+            if csf::generated::why_generated(f[2], &csf.generated_paths, header).is_some() {
+                generated += 1;
+            } else {
                 src.push((churn, f[2].to_string()));
             }
         }
@@ -246,14 +285,31 @@ pub fn candidates(repo: &Path, since: &str) -> Result<Vec<Candidate>> {
         let pk_tst: BTreeSet<String> = tests.iter().map(|f| dir_of(f)).collect();
         let shared: Vec<String> = pk_src.intersection(&pk_tst).cloned().collect();
         let churn: u64 = src.iter().map(|(c, _)| c).sum();
-        if src.is_empty() || shared.is_empty() || churn > MAX_SRC_CHURN || pk_src.len() > MAX_SRC_PACKAGES {
+        if src.is_empty() {
+            reject(if generated > 0 { "only generated code changed".into() } else { "no Go source change".into() });
+            continue;
+        }
+        if shared.is_empty() {
+            reject("no package changes both source and tests".into());
+            continue;
+        }
+        if churn > MAX_SRC_CHURN {
+            reject(format!("source churn {churn} > {MAX_SRC_CHURN}"));
+            continue;
+        }
+        if pk_src.len() > MAX_SRC_PACKAGES {
+            reject(format!("source spans {} packages > {MAX_SRC_PACKAGES}", pk_src.len()));
             continue;
         }
         let roots: BTreeSet<Option<String>> = shared.iter().map(|p| module_root(repo, sha, p)).collect();
         let root = match roots.into_iter().collect::<Vec<_>>().as_slice() {
             [Some(r)] => r.clone(),
-            _ => continue,
+            _ => {
+                reject("the changed packages are not in exactly one Go module".into());
+                continue;
+            }
         };
+        let src_files: Vec<String> = src.into_iter().map(|(_, f)| f).collect();
         out.push(Candidate {
             sha: sha.to_string(),
             parent: git(repo, &["rev-parse", &format!("{sha}^")])?.trim().to_string(),
@@ -261,24 +317,35 @@ pub fn candidates(repo: &Path, since: &str) -> Result<Vec<Candidate>> {
             body: git(repo, &["log", "-1", "--format=%b", sha])?.trim().to_string(),
             packages: shared.iter().map(|p| relative_package(&root, p)).collect(),
             module_root: root,
-            src_files: src.into_iter().map(|(_, f)| f).collect(),
+            csf: csf.task(&src_files),
+            src_files,
             test_files: tests,
             src_churn: churn,
         });
     }
-    Ok(out)
+    Ok((out, rejected))
 }
 
+/// Write every tracked file of `sha` into `dest`, faithfully. `git archive`
+/// is deliberately not used: it drops paths marked `export-ignore` in
+/// `.gitattributes`, which can remove the very tests or architecture model
+/// a task depends on. A throwaway index plus `checkout-index` writes the tree
+/// exactly as committed, without touching the repository's own index.
 pub fn export_tree(repo: &Path, sha: &str, dest: &Path) -> Result<()> {
     std::fs::create_dir_all(dest)?;
-    let mut archive = Command::new("git").args(["archive", "--format=tar", sha])
-        .current_dir(repo).stdout(Stdio::piped()).spawn()?;
-    let tar = Command::new("tar").arg("-x").arg("-C").arg(dest)
-        .stdin(archive.stdout.take().context("git archive stdout")?).status()?;
-    if !archive.wait()?.success() || !tar.success() {
-        bail!("exporting {sha} failed");
-    }
-    Ok(())
+    let index_dir = tempfile::Builder::new().prefix("rrsi-index-").tempdir()?;
+    let index = index_dir.path().join("index");
+    let run = |args: &[&std::ffi::OsStr]| -> Result<()> {
+        let out = Command::new("git").args(args).current_dir(repo)
+            .env("GIT_INDEX_FILE", &index).output().context("running git")?;
+        if !out.status.success() {
+            bail!("exporting {sha} failed: {}", String::from_utf8_lossy(&out.stderr));
+        }
+        Ok(())
+    };
+    run(&["read-tree".as_ref(), sha.as_ref()])?;
+    let work_tree = std::ffi::OsString::from(format!("--work-tree={}", dest.display()));
+    run(&[work_tree.as_os_str(), "checkout-index".as_ref(), "--all".as_ref(), "--force".as_ref()])
 }
 
 pub fn workdir(root: &str) -> String {
@@ -335,7 +402,8 @@ pub fn apply_patch(tree: &Path, patch: &str) -> Result<Option<String>> {
     Ok(if out.status.success() { None } else { Some(String::from_utf8_lossy(&out.stderr).into_owned()) })
 }
 
-pub fn validate(repo: &Path, out: &Path, cand: &Candidate, docker: &Docker) -> Result<TaskRecord> {
+pub fn validate(repo: &Path, out: &Path, cand: &Candidate, docker: &Docker, csf: &csf::MineCsf)
+    -> Result<TaskRecord> {
     let tdir = out.join(&cand.sha[..12]);
     let task_json = tdir.join("task.json");
     if task_json.is_file() {
@@ -358,7 +426,10 @@ pub fn validate(repo: &Path, out: &Path, cand: &Candidate, docker: &Docker) -> R
     export_tree(repo, &cand.sha, &commit)?;
     let mut rec = TaskRecord { cand: cand.clone(), valid: false, reason: String::new(),
                                fails_before: None, passes_after: None, parent_outcome: None,
-                               commit_outcome: None, detail: None, seconds: 0.0 };
+                               commit_outcome: None, detail: None, csf_guards: None, seconds: 0.0 };
+    // CSF's gates judge the reference fix's own tree; a gate it fails can
+    // never be required of an agent (required_of_agent = false).
+    rec.csf_guards = csf.guards(&commit)?;
     if let Some(err) = apply_patch(&parent, &tests_patch)? {
         rec.reason = "tests.patch does not apply to parent".into();
         rec.detail = Some(err.chars().take(400).collect());
@@ -426,7 +497,8 @@ pub fn enclosing_work_tree(path: &Path) -> Option<PathBuf> {
     abs.ancestors().find(|a| a.join(".git").exists()).map(Path::to_path_buf)
 }
 
-pub fn mine(repo: &Path, out: &Path, cands: Vec<Candidate>, jobs: usize, docker: &Docker) -> Result<()> {
+pub fn mine(repo: &Path, out: &Path, cands: Vec<Candidate>, jobs: usize, docker: &Docker,
+            csf: &csf::MineCsf) -> Result<()> {
     if let Some(tree) = enclosing_work_tree(out) {
         bail!("refusing to write mined tasks to {} inside the git work tree {}: \
                they contain repository source", out.display(), tree.display());
@@ -442,7 +514,7 @@ pub fn mine(repo: &Path, out: &Path, cands: Vec<Candidate>, jobs: usize, docker:
                 let i = next.fetch_add(1, Ordering::SeqCst);
                 let Some(c) = cands.get(i) else { break };
                 println!("[mine] start {} {}", &c.sha[..12], c.subject.chars().take(60).collect::<String>());
-                let res = validate(repo, out, c, docker);
+                let res = validate(repo, out, c, docker, csf);
                 let n = done.fetch_add(1, Ordering::SeqCst) + 1;
                 match res {
                     Ok(r) => {
@@ -469,6 +541,7 @@ pub fn mine(repo: &Path, out: &Path, cands: Vec<Candidate>, jobs: usize, docker:
     Ok(())
 }
 
+pub mod csf;
 pub mod fairness;
 pub mod llm;
 pub mod scan;
@@ -573,7 +646,7 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         assert!(enclosing_work_tree(&outside.path().join("tasks")).is_none());
         let docker = Docker { image: "unused", modcache: "unused", buildcache: "unused", test_timeout: 1 };
-        let err = mine(d.path(), &inside, vec![], 1, &docker).unwrap_err();
+        let err = mine(d.path(), &inside, vec![], 1, &docker, &csf::MineCsf::default()).unwrap_err();
         assert!(format!("{err}").contains("inside the git work tree"));
         assert!(!inside.exists(), "nothing may be created inside the work tree");
     }
@@ -585,11 +658,11 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let cand = Candidate { sha: "a".repeat(40), parent: "b".repeat(40), subject: "s".into(),
                                body: String::new(), module_root: "m".into(), packages: vec![],
-                               src_files: vec![], test_files: vec![], src_churn: 1 };
+                               src_files: vec![], test_files: vec![], src_churn: 1, csf: None };
         let rec = |parent, commit| TaskRecord {
             cand: cand.clone(), valid: false, reason: String::new(), fails_before: None,
             passes_after: None, parent_outcome: Some(parent), commit_outcome: Some(commit),
-            detail: None, seconds: 0.0 };
+            detail: None, csf_guards: None, seconds: 0.0 };
         write_record(d.path(), &rec(Outcome::BuildFail, Outcome::Infra)).unwrap();
         assert!(d.path().join("retry.json").is_file() && !d.path().join("task.json").exists());
         write_record(d.path(), &rec(Outcome::BuildFail, Outcome::Pass)).unwrap();
@@ -599,6 +672,32 @@ mod tests {
         let fresh = tempfile::tempdir().unwrap();
         write_record(fresh.path(), &rec(Outcome::TestFail, Outcome::Pass)).unwrap();
         assert!(fresh.path().join("task.json").is_file());
+    }
+
+    #[test]
+    fn export_tree_keeps_export_ignored_paths() {
+        // Review (P2): `git archive` dropped `export-ignore` paths, removing
+        // the architecture model detection had just found.
+        let d = tempfile::tempdir().unwrap();
+        let r = d.path();
+        let git = |args: &[&str]| assert!(Command::new("git").args(args).current_dir(r)
+            .env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@example.invalid")
+            .env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@example.invalid")
+            .status().unwrap().success());
+        git(&["init", "-q"]);
+        std::fs::create_dir_all(r.join("csf")).unwrap();
+        std::fs::write(r.join("csf/architecture.csf"), "model\n").unwrap();
+        std::fs::write(r.join(".gitattributes"), "csf export-ignore\n").unwrap();
+        std::fs::write(r.join("main.go"), "package main\n").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "base"]);
+        let out = tempfile::tempdir().unwrap();
+        export_tree(r, "HEAD", out.path()).unwrap();
+        assert_eq!(std::fs::read_to_string(out.path().join("csf/architecture.csf")).unwrap(), "model\n");
+        assert!(out.path().join("main.go").is_file());
+        assert!(!out.path().join(".git").exists(), "the export is files only");
+        // The repository's own index is untouched.
+        git(&["diff", "--cached", "--quiet"]);
     }
 
     #[test]
@@ -635,5 +734,57 @@ mod tests {
         assert_eq!(c[0].packages, vec!["./pkg".to_string()]);
         assert_eq!(c[0].subject, "feat: add A");
         assert_eq!(c[0].src_files, vec!["mod/pkg/a.go".to_string()]);
+    }
+
+    #[test]
+    fn generated_code_is_never_a_fix_and_every_rejection_has_a_reason() {
+        let d = tempfile::tempdir().unwrap();
+        let r = d.path();
+        let run = |args: &[&str]| assert!(Command::new("git").args(args).current_dir(r)
+            .env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@example.invalid")
+            .env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@example.invalid")
+            .status().unwrap().success());
+        let write = |p: &str, text: &str| {
+            std::fs::create_dir_all(r.join(p).parent().unwrap()).unwrap();
+            std::fs::write(r.join(p), text).unwrap();
+        };
+        let header = "// Code generated by sqlc. DO NOT EDIT.\npackage pkg\n";
+        run(&["init", "-q"]);
+        write("go.mod", "module example.invalid/m\n");
+        write("pkg/a.go", "package pkg\n");
+        write("pkg/db.go", header);
+        write("pkg/api_cgen.go", "package pkg\n");
+        write("pkg/gen/x.go", "package gen\n");
+        run(&["add", "-A"]);
+        run(&["commit", "-qm", "base"]);
+        // Only generated files change beside the tests: not a task.
+        write("pkg/db.go", &format!("{header}var X = 1\n"));
+        write("pkg/api_cgen.go", "package pkg\n\nvar Y = 1\n");
+        write("pkg/db_test.go", "package pkg\n");
+        run(&["add", "-A"]);
+        run(&["commit", "-qm", "regenerate"]);
+        // A real change plus generated churn: only the real file is the fix.
+        write("pkg/a.go", "package pkg\n\nfunc A() int { return 1 }\n");
+        write("pkg/db.go", &format!("{header}var X = 2\n"));
+        write("pkg/gen/x.go", "package gen\n\nvar Z = 1\n");
+        write("pkg/a_test.go", "package pkg\n");
+        run(&["add", "-A"]);
+        run(&["commit", "-qm", "feat: A"]);
+        // Tests only.
+        write("pkg/b_test.go", "package pkg\n");
+        run(&["add", "-A"]);
+        run(&["commit", "-qm", "test: more"]);
+        let (c, rejected) = scan(r, "2000-01-01", &csf::MineCsf::default()).unwrap();
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].src_files, ["pkg/a.go"], "header-, _cgen- and /gen/-generated files are excluded");
+        assert_eq!(c[0].src_churn, 2, "generated churn is not counted");
+        assert_eq!(c[0].csf, None, "no CSF signal, no csf field");
+        let reasons: Vec<&str> = rejected.iter().map(|r| r.reason.as_str()).collect();
+        assert_eq!(reasons, ["no Go source change", "only generated code changed"]);
+        // A declared CSF generated root excludes a file no other rule catches.
+        let declared = csf::MineCsf { generated_paths: vec!["pkg".into()], ..Default::default() };
+        let (c, rejected) = scan(r, "2000-01-01", &declared).unwrap();
+        assert!(c.is_empty());
+        assert_eq!(rejected.iter().filter(|r| r.reason == "only generated code changed").count(), 2);
     }
 }

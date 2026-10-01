@@ -79,3 +79,26 @@ jobs:
           assert [e["sha12"] for e in exam] == ["aaaaaaaaaaaa"], exam
           assert exam[0]["instruction"] == "# Title\n" and exam[0]["packages"] == ["./p"]
           PY
+      - name: pyo3 csf_guard runs CSF's gates on a checkout
+        run: |
+          python - <<'PY'
+          import os, pathlib, stat, tempfile
+          import rrsi_mine
+          root = pathlib.Path(tempfile.mkdtemp())
+          tree = root / "tree"
+          (tree / "csf/architecture/generated").mkdir(parents=True)
+          (tree / "csf/architecture/architecture.csf").write_text("architecture x version 1 {}\n")
+          grammar = root / "language.ebnf"
+          grammar.write_text("")
+          # Stands in for csfc: check passes, check-generated reports drift.
+          fake = root / "csfc"
+          fake.write_text('#!/bin/sh\n[ "$1" = --help=plain ] && exit 0\n'
+                          '[ "$1" = check ] && { echo "architecture=x mode=check"; exit 0; }\n'
+                          'echo "csf/architecture/generated/review_cgen.md:1:1: CSF_GENERATED_DRIFT: run csfc emit" >&2; exit 1\n')
+          fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+          v = rrsi_mine.csf_guard(str(tree), csfc=str(fake), grammar=str(grammar))
+          assert [(g["gate"], g["status"]) for g in v] == [("csfc check", "pass"), ("csfc check-generated", "fail")], v
+          assert v[1]["diagnostics"][0]["code"] == "CSF_GENERATED_DRIFT", v
+          skipped = rrsi_mine.csf_guard(str(tree), csfc=str(root / "missing"))
+          assert {g["status"] for g in skipped} == {"skipped"}, skipped
+          PY

@@ -1,0 +1,22 @@
+// A made-up composition used as a test fixture.
+architecture shop version 1 {
+  process host kind go entrypoint "cmd/shop/main.go";
+  process db kind external;
+  scope app under host;
+  scope db_life under db;
+  manager wiring in host scope app source "cmd/shop" state existing lifecycle borrowed verification pending;
+  service orders in host scope app source "services/orders" state existing lifecycle scoped verification test "services/orders/orders_test.go";
+  library money in host scope app source "pkg/money" state existing lifecycle borrowed verification pending;
+  adapter mail in host scope app source "services/orders/mail" state existing lifecycle scoped verification pending;
+  gateway sql in host scope app source "services/orders/store/sql.go" state existing lifecycle borrowed verification pending;
+  resource postgres in db scope db_life state existing lifecycle borrowed verification pending;
+  requires wiring -> orders;
+  connect wiring -> orders via call state existing;
+  connect orders -> sql via call state existing;
+  connect sql -> postgres via remote boundary sql state existing;
+  scan "cmd/shop";
+  scan "services";
+  scan "pkg";
+  generated "services/orders/api_cgen.go";
+  generated "csf/architecture/generated";
+}
