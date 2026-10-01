@@ -113,4 +113,39 @@ fn go_list_output_is_byte_for_byte_unchanged() {
         std::fs::write(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/go_list.golden.jsonl"), &got).unwrap();
     }
     assert_eq!(got, GOLDEN);
+    assert_eq!(list(d.path(), &["--toolchain", "go"]), GOLDEN);
+    assert_eq!(list(d.path(), &["--toolchain", "auto"]), GOLDEN, "auto finds only Go here");
+}
+
+/// A Python project beside the Go module: `--toolchain python` lists its
+/// commit with the pytest file as the unit, Go's listing is unchanged, and
+/// `auto` lists both, each candidate once.
+#[test]
+fn python_candidates_list_beside_go_ones() {
+    let d = tempfile::tempdir().unwrap();
+    let r = d.path();
+    synthetic_go_repo(r);
+    write(r, "py/pyproject.toml", "[project]\nname = \"p\"\n");
+    write(r, "py/pkg/__init__.py", "");
+    write(r, "py/pkg/core.py", "def one():\n    return 1\n");
+    git(r, "2026-08-01T12:00:00Z", &["add", "-A"]);
+    git(r, "2026-08-01T12:00:00Z", &["commit", "-q", "-m", "py: base"]);
+    write(r, "py/pkg/core.py", "def one():\n    return 1\n\n\ndef two():\n    return 2\n");
+    write(r, "py/tests/test_core.py", "from pkg.core import two\n\n\ndef test_two():\n    assert two() == 2\n");
+    write(r, "py/tests/helpers.py", "");
+    git(r, "2026-08-02T12:00:00Z", &["add", "-A"]);
+    git(r, "2026-08-02T12:00:00Z", &["commit", "-q", "-m", "py: add two"]);
+    assert_eq!(list(r, &[]), GOLDEN, "Go's listing ignores Python");
+    let py: Vec<serde_json::Value> = list(r, &["--toolchain", "python"]).lines()
+        .map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(py.len(), 1);
+    assert_eq!(py[0]["subject"], "py: add two");
+    assert_eq!(py[0]["toolchain"], "python");
+    assert_eq!(py[0]["module_root"], "py");
+    assert_eq!(py[0]["packages"], serde_json::json!(["./tests/test_core.py"]));
+    assert_eq!(py[0]["src_files"], serde_json::json!(["py/pkg/core.py"]));
+    assert_eq!(py[0]["test_files"], serde_json::json!(["py/tests/helpers.py", "py/tests/test_core.py"]));
+    let auto = list(r, &["--toolchain", "auto"]);
+    assert_eq!(auto.lines().count(), GOLDEN.lines().count() + 1);
+    assert!(auto.starts_with(GOLDEN), "Go first, unchanged");
 }

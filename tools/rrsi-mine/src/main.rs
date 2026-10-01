@@ -18,12 +18,13 @@ use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use rrsi_mine::fairness::{self as fair, Task};
 use rrsi_mine::llm::{Copilot, ProcessRunner};
-use rrsi_mine::{candidates, mine, Docker};
+use rrsi_mine::toolchain::{bazel::Bazel, cpp::Cpp, go::Go, python::Python, Sandbox, Toolchains};
+use rrsi_mine::mine;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[derive(Parser)]
-#[command(version, about = "Mine FAIL_TO_PASS-validated Go tasks from git history")]
+#[command(version, about = "Mine FAIL_TO_PASS-validated tasks (Go, Python, C++, Bazel) from git history")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -37,6 +38,10 @@ enum Cmd {
         repo: PathBuf,
         #[arg(long, default_value = "2026-06-01")]
         since: String,
+        #[command(flatten)]
+        tc: ToolchainArg,
+        #[command(flatten)]
+        go: GoArgs,
     },
     /// Validate candidates in containers and write the task directory.
     Mine {
@@ -50,6 +55,8 @@ enum Cmd {
         jobs: usize,
         #[arg(long, default_value_t = 0)]
         limit: usize,
+        #[command(flatten)]
+        tc: ToolchainArg,
         #[command(flatten)]
         go: GoArgs,
     },
@@ -132,6 +139,18 @@ struct StageArgs {
 }
 
 #[derive(Args)]
+struct ToolchainArg {
+    /// Which toolchain finds and validates candidates: go (the default),
+    /// python (pytest), cpp (CMake + CTest), bazel (`bazel test`), or auto
+    /// (every toolchain with a project root at HEAD; a commit goes to the
+    /// first that claims it, in that order).
+    #[arg(long, default_value = "go", value_parser = ["auto", "go", "python", "cpp", "bazel"])]
+    toolchain: String,
+}
+
+/// Container settings of every toolchain. The Go flags are unchanged; the
+/// others are pinned by digest and capped like the Go run.
+#[derive(Args)]
 struct GoArgs {
     #[arg(long, env = "RRSI_GO_IMAGE", default_value = "golang:1.26.5")]
     image: String,
@@ -141,12 +160,49 @@ struct GoArgs {
     buildcache: String,
     #[arg(long, env = "RRSI_GO_TEST_TIMEOUT", default_value_t = 600)]
     test_timeout: u64,
+    #[arg(long, env = "RRSI_PYTHON_IMAGE", default_value = PYTHON_IMAGE)]
+    python_image: String,
+    /// Named volume of the Python virtualenvs and uv's caches.
+    #[arg(long, env = "RRSI_PYTHON_DEPS", default_value = "rrsi-pydeps")]
+    python_deps: String,
+    #[arg(long, env = "RRSI_CPP_IMAGE", default_value = CPP_IMAGE)]
+    cpp_image: String,
+    /// Extra cmake configure arguments (repeatable), e.g. -DFOO_TESTS=ON.
+    #[arg(long = "cmake-arg", allow_hyphen_values = true)]
+    cmake_args: Vec<String>,
+    #[arg(long, env = "RRSI_BAZEL_IMAGE", default_value = BAZEL_IMAGE)]
+    bazel_image: String,
+    /// Named volume of Bazel's output base, repository and disk caches.
+    #[arg(long, env = "RRSI_BAZEL_CACHE", default_value = "rrsi-bazelcache")]
+    bazel_cache: String,
+    #[arg(long, env = "RRSI_CPUS", default_value = "4")]
+    cpus: String,
+    #[arg(long, env = "RRSI_MEMORY", default_value = "6g")]
+    memory: String,
+    /// Seconds the networked prefetch of a non-Go toolchain may take.
+    #[arg(long, env = "RRSI_PREFETCH_TIMEOUT", default_value_t = 3600)]
+    prefetch_timeout: u64,
 }
 
+const PYTHON_IMAGE: &str = "ghcr.io/astral-sh/uv:python3.12-bookworm@sha256:85d4cb1afa769a7338e095b927bee941cf5ec92266c7424b3f6c0f2748567248";
+const CPP_IMAGE: &str = "mcr.microsoft.com/devcontainers/cpp:1-ubuntu-24.04@sha256:d51703c4fcbe93cd889d38005847521d87cca4d304f33423430daf10a384a332";
+const BAZEL_IMAGE: &str = "gcr.io/bazel-public/bazel:9.2.0@sha256:e59bd66f8daf69f02dbfc18dbd72f0ecfe7926bbda95a5c9eb62433d83b8bd02";
+
 impl GoArgs {
-    fn docker(&self) -> Docker<'_> {
-        Docker { image: &self.image, modcache: &self.modcache, buildcache: &self.buildcache,
-                 test_timeout: self.test_timeout }
+    fn sandbox(&self, image: &str) -> Sandbox {
+        Sandbox { image: image.to_string(), cpus: self.cpus.clone(), memory: self.memory.clone(),
+                  timeout: self.test_timeout, prefetch_timeout: self.prefetch_timeout }
+    }
+
+    fn toolchains(&self) -> Toolchains {
+        Toolchains { all: vec![
+            Box::new(Go { image: self.image.clone(), modcache: self.modcache.clone(),
+                          buildcache: self.buildcache.clone(), test_timeout: self.test_timeout }),
+            Box::new(Python { sandbox: self.sandbox(&self.python_image), deps: self.python_deps.clone() }),
+            Box::new(Cpp { sandbox: self.sandbox(&self.cpp_image), cmake_args: self.cmake_args.clone() }),
+            Box::new(Bazel { sandbox: self.sandbox(&self.bazel_image), cache: self.bazel_cache.clone(),
+                             lock: Default::default() }),
+        ] }
     }
 }
 
@@ -188,23 +244,25 @@ fn gate(s: &StageArgs, tasks: &[Task]) -> Result<()> {
 
 fn main() -> Result<()> {
     match Cli::parse().cmd {
-        Cmd::List { repo, since } => {
-            for c in candidates(&repo, &since)? {
+        Cmd::List { repo, since, tc, go } => {
+            let tcs = go.toolchains();
+            for c in tcs.candidates(&repo, &since, &tc.toolchain)? {
                 println!("{}", serde_json::to_string(&c)?);
             }
         }
-        Cmd::Mine { repo, out, since, jobs, limit, go } => {
+        Cmd::Mine { repo, out, since, jobs, limit, tc, go } => {
             let repo = repo.canonicalize().context("--repo")?;
-            let mut cands = candidates(&repo, &since)?;
+            let tcs = go.toolchains();
+            let mut cands = tcs.candidates(&repo, &since, &tc.toolchain)?;
             if limit > 0 {
                 cands.truncate(limit);
             }
-            mine(&repo, &out, cands, jobs, &go.docker())?;
+            mine(&repo, &out, cands, jobs, &tcs)?;
         }
         Cmd::Flake { stage, repo, runs, go } => {
-            let (repo, docker) = (canonical(&repo)?, go.docker());
+            let (repo, tcs) = (canonical(&repo)?, go.toolchains());
             fair::run_stage("flake", &load(&stage)?, stage.jobs, stage.force,
-                            |t| fair::flake(&repo, t, &docker, runs))?;
+                            |t| fair::flake(&repo, t, &tcs, runs))?;
         }
         Cmd::Api { stage } => fair::run_stage("api", &load(&stage)?, stage.jobs, stage.force, fair::api)?,
         Cmd::Describe { stage, repo, llm } => {
@@ -228,11 +286,11 @@ fn main() -> Result<()> {
         Cmd::Fairness { stage, repo, runs, go, llm } => {
             anyhow::ensure!(llm.describe_model != llm.probe_model,
                             "the reviewer must be a different model from the writer");
-            let (repo, docker) = (canonical(&repo)?, go.docker());
+            let (repo, tcs) = (canonical(&repo)?, go.toolchains());
             let (writer, reviewer) = (llm.copilot(&llm.describe_model), llm.copilot(&llm.probe_model));
             let tasks = load(&stage)?;
             let (j, f) = (stage.jobs, stage.force);
-            fair::run_stage("flake", &tasks, j, f, |t| fair::flake(&repo, t, &docker, runs))?;
+            fair::run_stage("flake", &tasks, j, f, |t| fair::flake(&repo, t, &tcs, runs))?;
             fair::run_stage("api", &tasks, j, f, fair::api)?;
             fair::run_stage("describe", &tasks, j, f, |t| fair::describe(Some(&repo), t, &writer))?;
             fair::run_stage("probe", &tasks, j, f, |t| fair::probe(&repo, t, &reviewer))?;

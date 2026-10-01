@@ -16,7 +16,8 @@
 //!
 //! ```text
 //! import rrsi_mine
-//! rrsi_mine.list_candidates("/path/to/repo", "2026-06-01") -> list[dict]
+//! rrsi_mine.list_candidates("/path/to/repo", "2026-06-01", toolchain="go") -> list[dict]
+//!                   (toolchain: go, python, cpp, bazel or auto; listing runs no container)
 //! rrsi_mine.export_tree(repo, sha, dest)
 //! rrsi_mine.apply_patch(tree, patch) -> str | None   (error text, or None)
 //! rrsi_mine.go_test(tree, module_root, packages, image=..., modcache=...,
@@ -35,9 +36,25 @@ fn err(e: anyhow::Error) -> PyErr {
     PyRuntimeError::new_err(format!("{e:#}"))
 }
 
+/// Toolchains with default container settings: enough for listing.
+fn listing_toolchains() -> crate::Toolchains {
+    use crate::toolchain::{bazel::Bazel, cpp::Cpp, go::Go, python::Python, Sandbox};
+    let sb = || Sandbox { image: String::new(), cpus: "4".into(), memory: "6g".into(), timeout: 600,
+                          prefetch_timeout: 3600 };
+    crate::Toolchains { all: vec![
+        Box::new(Go { image: "golang:1.26.5".into(), modcache: "rrsi-gomodcache".into(),
+                      buildcache: "rrsi-gobuildcache".into(), test_timeout: 600 }),
+        Box::new(Python { sandbox: sb(), deps: String::new() }),
+        Box::new(Cpp { sandbox: sb(), cmake_args: vec![] }),
+        Box::new(Bazel { sandbox: sb(), cache: String::new(), lock: Default::default() }),
+    ] }
+}
+
 #[pyfunction]
-fn list_candidates(py: Python<'_>, repo: &str, since: &str) -> PyResult<PyObject> {
-    let cands = py.allow_threads(|| crate::candidates(Path::new(repo), since)).map_err(err)?;
+#[pyo3(signature = (repo, since, toolchain = "go"))]
+fn list_candidates(py: Python<'_>, repo: &str, since: &str, toolchain: &str) -> PyResult<PyObject> {
+    let cands = py.allow_threads(|| listing_toolchains().candidates(Path::new(repo), since, toolchain))
+        .map_err(err)?;
     let json = serde_json::to_string(&cands).map_err(|e| err(e.into()))?;
     let loads = PyModule::import(py, "json")?.getattr("loads")?;
     Ok(loads.call1((json,))?.unbind())

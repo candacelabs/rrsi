@@ -33,7 +33,8 @@
 
 use crate::llm::Copilot;
 use crate::scan::{self, Required};
-use crate::{Docker, Outcome, TaskRecord};
+use crate::toolchain::{self, FileKind, Toolchains};
+use crate::{Outcome, TaskRecord};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -58,18 +59,36 @@ impl Task {
         &self.rec.cand.sha[..12.min(self.rec.cand.sha.len())]
     }
 
+    /// The task's toolchain (`go` for tasks mined before toolchains).
+    pub fn toolchain(&self) -> &str {
+        self.rec.cand.toolchain.as_deref().unwrap_or("go")
+    }
+
+    pub fn is_go(&self) -> bool {
+        self.toolchain() == "go"
+    }
+
     /// tests.patch restricted to the packages `go test` runs: test files of
-    /// other packages are never graded, so no stage may rely on them.
+    /// other packages are never graded, so no stage may rely on them. Other
+    /// toolchains' tests.patch holds only the tests of the units they run.
     pub fn graded_tests(&self) -> Result<String> {
-        Ok(scan::patch_in_dirs(&self.read("tests.patch")?, &self.package_dirs()))
+        let patch = self.read("tests.patch")?;
+        Ok(if self.is_go() { scan::patch_in_dirs(&patch, &self.package_dirs()) } else { patch })
     }
 
     pub fn read(&self, name: &str) -> Result<String> {
         std::fs::read_to_string(self.dir.join(name)).with_context(|| format!("{}/{name}", self.short()))
     }
 
-    /// Repository-relative directories of the task's packages.
+    /// Repository-relative directories of the task's packages (for a
+    /// non-Go task: the directories of its source and test files).
     pub fn package_dirs(&self) -> Vec<String> {
+        let c = &self.rec.cand;
+        if !self.is_go() {
+            let dirs: std::collections::BTreeSet<String> = c.src_files.iter().chain(&c.test_files)
+                .map(|f| crate::dir_of(f)).collect();
+            return dirs.into_iter().collect();
+        }
         let root = &self.rec.cand.module_root;
         self.rec.cand.packages.iter().map(|p| {
             let rel = p.trim_start_matches("./").trim_end_matches('/');
@@ -198,18 +217,19 @@ fn pass_word(p: bool) -> &'static str {
 // ---- flake ----
 
 /// Re-run the commit tree's tests `runs` times; every run must pass.
-pub fn flake(repo: &Path, t: &Task, docker: &Docker, runs: usize) -> Result<Step> {
+pub fn flake(repo: &Path, t: &Task, tcs: &Toolchains, runs: usize) -> Result<Step> {
+    let tc = tcs.for_candidate(&t.rec.cand)?;
     let work = tempfile::Builder::new().prefix("rrsi-flake-").tempdir()?;
     let tree = work.path().join("commit");
     crate::export_tree(repo, &t.rec.cand.sha, &tree)?;
-    let (ok, log) = docker.download(&tree, &t.rec.cand.module_root)?;
+    let (ok, log) = tc.prefetch(&tree, &t.rec.cand)?;
     if !ok {
         let tail: String = log.chars().rev().take(200).collect::<Vec<_>>().into_iter().rev().collect();
-        return Ok(Step::Retry(format!("infra: go mod download failed: {}", tail.trim())));
+        return Ok(Step::Retry(format!("infra: {} failed: {}", tc.prefetch_label(), tail.trim())));
     }
     let mut outcomes = Vec::new();
     for i in 0..runs {
-        let (out, log) = docker.go_test(&tree, &t.rec.cand.module_root, &t.rec.cand.packages)?;
+        let (out, log) = tc.run_tests(&tree, &t.rec.cand)?;
         if out == Outcome::Infra {
             return Ok(Step::Retry(format!("infra on run {}", i + 1)));
         }
@@ -285,13 +305,14 @@ fn capped(s: &str, n: usize) -> String {
 pub fn describe_prompt(t: &Task, tests_patch: &str, existing: &str, required: &[Required],
                        feedback: &str) -> String {
     let c = &t.rec.cand;
+    let (lang, fence) = toolchain::language(c.toolchain.as_deref());
     let api: String = required.iter().map(|r| if r.signature.is_empty() {
         format!("- `{}` ({}; signature not known: describe what it must be from its use)\n", r.symbol, r.kind)
     } else {
         format!("- `{}` ({}): `{}`\n", r.symbol, r.kind, r.signature)
     }).collect();
     format!("\
-You are writing the problem statement for a coding exercise in a Go repository.
+You are writing the problem statement for a coding exercise in a {lang} repository.
 A developer will receive ONLY your statement and the repository as it is now.
 Write it as the GitHub issue a maintainer would file asking for this change.
 You have no tools and need none: everything you may use is below.
@@ -331,7 +352,7 @@ Required API:
 {api}
 Existing code of the package(s) before the change (for context: what exists
 and must keep working):
-```go
+```{fence}
 {existing}
 ```
 
@@ -345,7 +366,7 @@ not mention or quote them):
         body = if c.body.trim().is_empty() { "(none)" } else { c.body.trim() },
         api = if api.is_empty() { "(none)\n".into() } else { api },
         existing = if existing.trim().is_empty() { "(not available)" } else { existing },
-        tests = capped(tests_patch, MAX_PROMPT_PATCH), feedback = feedback)
+        tests = capped(tests_patch, MAX_PROMPT_PATCH), feedback = feedback, lang = lang, fence = fence)
 }
 
 /// The issue in a writer's reply: a whole reply wrapped in one ```markdown
@@ -473,6 +494,12 @@ pub const MAX_API_CONTEXT: usize = 60_000;
 /// block per file, capped at MAX_API_CONTEXT bytes.
 pub fn parent_api(repo: &Path, t: &Task) -> Result<String> {
     let mut out = String::new();
+    if !t.is_go() {
+        // No declaration scanner for other languages: the parent's source
+        // of the touched files' directories, capped.
+        let whole: String = parent_sources(repo, t)?.iter().map(|(p, s)| format!("// ==== {p}\n{s}\n")).collect();
+        return Ok(capped(&whole, MAX_API_CONTEXT));
+    }
     for (path, src) in parent_sources(repo, t)? {
         let decls = scan::exported_api(&src, &path);
         if decls.is_empty() {
@@ -489,14 +516,24 @@ pub fn parent_api(repo: &Path, t: &Task) -> Result<String> {
     Ok(out)
 }
 
-/// (path, text) of the non-test Go files of the task's packages at the parent.
+/// (path, text) of the non-test Go files of the task's packages at the parent
+/// (for other toolchains: the source files, by the toolchain's own
+/// classification, in the directories of the fix's files).
 pub fn parent_sources(repo: &Path, t: &Task) -> Result<Vec<(String, String)>> {
     let parent = &t.rec.cand.parent;
     let mut out = Vec::new();
-    for dir in t.package_dirs() {
+    let dirs: Vec<String> = if t.is_go() { t.package_dirs() } else {
+        let d: std::collections::BTreeSet<String> = t.rec.cand.src_files.iter().map(|f| crate::dir_of(f)).collect();
+        d.into_iter().collect()
+    };
+    let is_source = |dir: &str, name: &str| if t.is_go() { name.ends_with(".go") && !name.ends_with("_test.go") } else {
+        let path = if dir.is_empty() { name.to_string() } else { format!("{dir}/{name}") };
+        toolchain::classify_file(Some(t.toolchain()), &path) == FileKind::Source
+    };
+    for dir in dirs {
         let spec = if dir.is_empty() { parent.clone() } else { format!("{parent}:{dir}") };
         let Ok(list) = crate::git(repo, &["ls-tree", "--name-only", &spec]) else { continue };
-        for name in list.lines().filter(|n| n.ends_with(".go") && !n.ends_with("_test.go")) {
+        for name in list.lines().filter(|n| is_source(&dir, n)) {
             let path = if dir.is_empty() { name.to_string() } else { format!("{dir}/{name}") };
             out.push((path.clone(), crate::git(repo, &["show", &format!("{parent}:{path}")])?));
         }
@@ -504,12 +541,12 @@ pub fn parent_sources(repo: &Path, t: &Task) -> Result<Vec<(String, String)>> {
     Ok(out)
 }
 
-pub fn probe_prompt(instruction: &str, api: &str) -> String {
+pub fn probe_prompt(instruction: &str, api: &str, lang: &str) -> String {
     format!("\
 You are reviewing a problem statement before it is given to a developer. The
 developer will see ONLY this statement and the repository (whose existing
 exported API for the affected packages is listed below). Judge whether a
-competent Go developer could implement exactly what is asked, with the exact
+competent {lang} developer could implement exactly what is asked, with the exact
 names and signatures other code will call, WITHOUT guessing.
 
 Answer with ONE JSON object and nothing else:
@@ -540,7 +577,8 @@ pub fn probe(repo: &Path, t: &Task, llm: &Copilot) -> Result<Step> {
     }
     let instruction = t.read(INSTRUCTION)?;
     let api = parent_api(repo, t)?;
-    let reply = llm.complete(&probe_prompt(&instruction, &api))?;
+    let lang = toolchain::language(t.rec.cand.toolchain.as_deref()).0;
+    let reply = llm.complete(&probe_prompt(&instruction, &api, lang))?;
     let p = match scan::parse_probe(&reply) {
         Ok(p) => p,
         Err(e) => return Ok(Step::Retry(format!("unparseable reviewer reply: {e}"))),
@@ -694,7 +732,8 @@ mod tests {
                               subject: "box: report when full".into(), body: String::new(),
                               module_root: "m".into(), packages: vec!["./pkg/box".into()],
                               src_files: vec!["m/pkg/box/box.go".into()],
-                              test_files: vec!["m/pkg/box/box_test.go".into()], src_churn: 4 },
+                              test_files: vec!["m/pkg/box/box_test.go".into()], src_churn: 4,
+                              toolchain: None },
             valid, reason: if valid { "ok".into() } else { "tests already pass on parent".into() },
             fails_before: None, passes_after: None, parent_outcome: Some(Outcome::BuildFail),
             commit_outcome: Some(Outcome::Pass), detail: None, seconds: 1.0 };
