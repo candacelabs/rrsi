@@ -113,7 +113,7 @@ else
   for f in requirements*.txt; do
     if [ -f "$f" ]; then uv pip install -q --python "$tmp/bin/python" -r "$f" || exit 1; fi
   done
-  if [ -f pyproject.toml ] || [ -f setup.py ]; then
+  if [ -f pyproject.toml ] || [ -f setup.py ] || [ -f setup.cfg ]; then
     uv pip install -q --python "$tmp/bin/python" -e '.[test,tests,testing,dev]' \
       || uv pip install -q --python "$tmp/bin/python" -e . || exit 1
   fi
@@ -394,6 +394,9 @@ mod tests {
     fn the_scripts_prefetch_with_uv_and_test_offline_with_pytest() {
         let p = prefetch_script();
         assert!(p.contains("uv sync --frozen") && p.contains("-r \"$f\"") && p.contains("pytest"));
+        // Review (P2): a setup.cfg-only project (e.g. a src/ layout) is
+        // installed too, or pytest cannot import it on either side.
+        assert!(p.contains("[ -f pyproject.toml ] || [ -f setup.py ] || [ -f setup.cfg ]"));
         let t = test_script(&["./tests/test_a.py".into(), "./it's.py".into()]);
         assert!(t.contains("-m pytest -p no:cacheprovider -q -rfE --color=no './tests/test_a.py' './it'\\''s.py'"));
         assert!(t.contains("exit 97"), "a missing environment is reported, never tested without it");

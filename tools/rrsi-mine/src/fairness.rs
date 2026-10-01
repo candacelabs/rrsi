@@ -222,13 +222,28 @@ pub fn flake(repo: &Path, t: &Task, tcs: &Toolchains, runs: usize) -> Result<Ste
     let work = tempfile::Builder::new().prefix("rrsi-flake-").tempdir()?;
     let tree = work.path().join("commit");
     crate::export_tree(repo, &t.rec.cand.sha, &tree)?;
-    let (ok, log) = tc.prefetch(&tree, &t.rec.cand)?;
-    if !ok {
+    // Same protection as validation: with a shared prefetch slot (Bazel),
+    // hold it for the whole sequence and refetch right before every run,
+    // or a concurrent task's prefetch replaces this tree's dependencies.
+    let _serial = crate::shared_prefetch_guard(tc);
+    let prefetch = || -> Result<Option<Step>> {
+        let (ok, log) = tc.prefetch(&tree, &t.rec.cand)?;
+        if ok {
+            return Ok(None);
+        }
         let tail: String = log.chars().rev().take(200).collect::<Vec<_>>().into_iter().rev().collect();
-        return Ok(Step::Retry(format!("infra: {} failed: {}", tc.prefetch_label(), tail.trim())));
+        Ok(Some(Step::Retry(format!("infra: {} failed: {}", tc.prefetch_label(), tail.trim()))))
+    };
+    if let Some(retry) = prefetch()? {
+        return Ok(retry);
     }
     let mut outcomes = Vec::new();
     for i in 0..runs {
+        if i > 0 && tc.prefetch_before_each_run() {
+            if let Some(retry) = prefetch()? {
+                return Ok(retry);
+            }
+        }
         let (out, log) = tc.run_tests(&tree, &t.rec.cand)?;
         if out == Outcome::Infra {
             return Ok(Step::Retry(format!("infra on run {}", i + 1)));
@@ -693,6 +708,14 @@ pub struct ExamTask {
     pub module_root: String,
     pub packages: Vec<String>,
     pub instruction: String,
+    /// Which toolchain validates an answer (`go`, `python`, `bazel`, ...).
+    /// Task records mined before toolchains existed have none: they are Go.
+    #[serde(default = "default_toolchain")]
+    pub toolchain: String,
+}
+
+fn default_toolchain() -> String {
+    "go".to_string()
 }
 
 /// The exam-ready tasks under `tasks_dir`, judged afresh from the verdicts.
@@ -705,7 +728,8 @@ pub fn load_exam(tasks_dir: &Path) -> Result<Vec<ExamTask>> {
         let c = &t.rec.cand;
         out.push(ExamTask { sha: c.sha.clone(), sha12: t.short().to_string(), parent: c.parent.clone(),
                             module_root: c.module_root.clone(), packages: c.packages.clone(),
-                            instruction: t.read(INSTRUCTION)? });
+                            instruction: t.read(INSTRUCTION)?,
+                            toolchain: c.toolchain.clone().unwrap_or_else(default_toolchain) });
     }
     Ok(out)
 }
@@ -888,6 +912,82 @@ mod tests {
         assert_eq!(gate_of(&invalid).failing[0].stage, "valid");
     }
 
+    /// A toolchain with one shared prefetch slot that records every call.
+    struct SharedSlot {
+        events: std::sync::Arc<Mutex<Vec<String>>>,
+    }
+
+    impl crate::Toolchain for SharedSlot {
+        fn name(&self) -> &'static str { "go" }
+        fn is_root_marker(&self, _: &str) -> bool { false }
+        fn classify_file(&self, _: &str) -> crate::toolchain::FileKind { crate::toolchain::FileKind::Other }
+        fn project_root(&self, _: &crate::toolchain::Changed) -> Option<String> { None }
+        fn units(&self, _: &crate::toolchain::Changed, _: &str, _: &dyn Fn(&str) -> Result<String>) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+        fn prefetch_label(&self) -> &'static str { "prefetch" }
+        fn test_label(&self, _: &[String]) -> String { String::new() }
+        fn prefetch_before_each_run(&self) -> bool { true }
+        fn prefetch(&self, _: &Path, cand: &Candidate) -> Result<(bool, String)> {
+            self.events.lock().unwrap().push(format!("pre:{}", cand.sha));
+            // Long enough that an unguarded concurrent task would interleave.
+            std::thread::sleep(Duration::from_millis(20));
+            Ok((true, String::new()))
+        }
+        fn run_tests(&self, _: &Path, cand: &Candidate) -> Result<(Outcome, String)> {
+            std::thread::sleep(Duration::from_millis(20));
+            self.events.lock().unwrap().push(format!("run:{}", cand.sha));
+            Ok((Outcome::Pass, String::new()))
+        }
+    }
+
+    #[test]
+    fn concurrent_flake_runs_never_share_a_prefetch_slot() {
+        // Review (P1): flake prefetched once and ran tasks concurrently, so
+        // with Bazel's single output base one task's prefetch could replace
+        // another's before its offline run. Every run must directly follow
+        // its own task's prefetch.
+        let repo = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git").args(args).current_dir(repo.path())
+                .env("GIT_AUTHOR_NAME", "t").env("GIT_AUTHOR_EMAIL", "t@example.invalid")
+                .env("GIT_COMMITTER_NAME", "t").env("GIT_COMMITTER_EMAIL", "t@example.invalid")
+                .output().unwrap();
+            assert!(out.status.success());
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        git(&["init", "-q"]);
+        let mut shas = vec![];
+        for i in 0..2 {
+            std::fs::write(repo.path().join("f.txt"), format!("{i}\n")).unwrap();
+            git(&["add", "-A"]);
+            git(&["commit", "-qm", "c"]);
+            shas.push(git(&["rev-parse", "HEAD"]));
+        }
+        let tasks_dir = tempfile::tempdir().unwrap();
+        let tasks: Vec<Task> = shas.iter().enumerate().map(|(i, sha)| {
+            let mut t = task(tasks_dir.path(), &format!("{i}{}", "a".repeat(11)), true);
+            t.rec.cand.sha = sha.clone();
+            t
+        }).collect();
+        let events = std::sync::Arc::new(Mutex::new(vec![]));
+        let tcs = crate::Toolchains { all: vec![Box::new(SharedSlot { events: events.clone() })] };
+        std::thread::scope(|s| {
+            for t in &tasks {
+                let (repo, tcs) = (repo.path(), &tcs);
+                s.spawn(move || flake(repo, t, tcs, 2).unwrap());
+            }
+        });
+        let events = events.lock().unwrap().clone();
+        assert_eq!(events.iter().filter(|e| e.starts_with("run:")).count(), 4, "{events:?}");
+        for (i, e) in events.iter().enumerate() {
+            if let Some(sha) = e.strip_prefix("run:") {
+                assert_eq!(events[i - 1], format!("pre:{sha}"),
+                           "run {i} did not directly follow its own prefetch: {events:?}");
+            }
+        }
+    }
+
     #[test]
     fn exam_lists_only_ready_tasks_with_their_statement() {
         let d = tempfile::tempdir().unwrap();
@@ -900,6 +1000,9 @@ mod tests {
         let exam = load_exam(d.path()).unwrap();
         assert_eq!(exam.len(), 1);
         assert_eq!((exam[0].sha12.as_str(), exam[0].instruction.as_str()), ("aaaaaaaaaaaa", "# Do the thing\n"));
+        // Review (P2): consumers must be able to pick the validating
+        // toolchain; records from before toolchains existed are Go.
+        assert_eq!(exam[0].toolchain, "go");
         let tasks = load_tasks(d.path(), None).unwrap();
         run_stage("gate", &tasks, 2, false, gate).unwrap();
         let gates = write_exam(d.path(), &tasks).unwrap();

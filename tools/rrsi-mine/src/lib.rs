@@ -289,6 +289,18 @@ pub fn candidates(repo: &Path, since: &str) -> Result<Vec<Candidate>> {
     Ok(out)
 }
 
+static SHARED_PREFETCH: Mutex<()> = Mutex::new(());
+
+/// Exclusive use of the shared prefetch slot for toolchains that have one
+/// (Bazel's single output base: one tree's prefetch replaces another's).
+/// Every stage that prefetches and then runs offline (validation and the
+/// fairness flake stage) holds this for the whole prefetch-and-run sequence,
+/// so no other task's prefetch can land in between. `None` for toolchains
+/// whose prefetches never interfere.
+pub fn shared_prefetch_guard(tc: &dyn Toolchain) -> Option<std::sync::MutexGuard<'static, ()>> {
+    tc.prefetch_before_each_run().then(|| SHARED_PREFETCH.lock().unwrap_or_else(|p| p.into_inner()))
+}
+
 pub fn export_tree(repo: &Path, sha: &str, dest: &Path) -> Result<()> {
     std::fs::create_dir_all(dest)?;
     let mut archive = Command::new("git").args(["archive", "--format=tar", sha])
@@ -373,11 +385,7 @@ pub fn validate(repo: &Path, out: &Path, cand: &Candidate, tc: &dyn Toolchain) -
     std::fs::write(tdir.join("tests.patch"), &tests_patch)?;
     std::fs::write(tdir.join("src.patch"), diff(&cand.src_files)?)?;
 
-    // A toolchain with one shared prefetch slot validates one task at a
-    // time, so no other task's prefetch lands between this one's prefetch
-    // and run.
-    static SERIAL: Mutex<()> = Mutex::new(());
-    let _serial = tc.prefetch_before_each_run().then(|| SERIAL.lock().unwrap_or_else(|p| p.into_inner()));
+    let _serial = shared_prefetch_guard(tc);
     let work = tempfile::Builder::new().prefix("rrsi-mine-").tempdir()?;
     let (parent, commit) = (work.path().join("parent"), work.path().join("commit"));
     export_tree(repo, &cand.parent, &parent)?;
