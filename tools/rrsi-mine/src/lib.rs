@@ -46,8 +46,10 @@
 //! ```
 //!
 //! Miners are plugins (src/miner.rs, src/miners/): this git-history miner is
-//! registered as `git-history`, and `traces` (src/miners/traces.rs) mines
-//! agent struggles from Claude Code session transcripts.
+//! registered as `git-history`, `traces` (src/miners/traces.rs) mines
+//! agent struggles from Claude Code session transcripts, and `slices`
+//! (src/miners/slices.rs) mines only the commits of merged slice PRs, tagging
+//! each task with its slice and the ontology signals its fix moved.
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -250,8 +252,14 @@ pub fn candidates(repo: &Path, since: &str) -> Result<Vec<Candidate>> {
 /// the rest with the reason each is not one. `csf` supplies declared
 /// generated roots and the component map (empty outside CSF repositories).
 pub fn scan(repo: &Path, since: &str, csf: &csf::MineCsf) -> Result<(Vec<Candidate>, Vec<Rejection>)> {
+    scan_rev(repo, "HEAD", since, csf)
+}
+
+/// [`scan`] over the history of `rev` instead of `HEAD`.
+pub fn scan_rev(repo: &Path, rev: &str, since: &str, csf: &csf::MineCsf)
+    -> Result<(Vec<Candidate>, Vec<Rejection>)> {
     let since_arg = format!("--since={since}");
-    let log = git(repo, &["log", &since_arg, "--no-merges", "--format=%H", "--", "*_test.go"])?;
+    let log = git(repo, &["log", &since_arg, "--no-merges", "--format=%H", rev, "--", "*_test.go"])?;
     let gix_repo = gix::discover(repo).context("opening the repository")?;
     let mut out = Vec::new();
     let mut rejected = Vec::new();
