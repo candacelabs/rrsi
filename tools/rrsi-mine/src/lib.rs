@@ -40,6 +40,9 @@
 //! rrsi-mine fairness --tasks DIR --repo PATH [--jobs 2] [--only SHA12] [--force]
 //! rrsi-mine flake|api|describe|probe|specificity|gate --tasks DIR ...
 //! ```
+//!
+//! `rrsi-mine traces` (src/traces.rs) is separate: it mines agent struggles
+//! from Claude Code session transcripts for the harness miner.
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -468,6 +471,7 @@ pub fn mine(repo: &Path, out: &Path, cands: Vec<Candidate>, jobs: usize, docker:
 pub mod fairness;
 pub mod llm;
 pub mod scan;
+pub mod traces;
 
 #[cfg(feature = "python")]
 mod python;

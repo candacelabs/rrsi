@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[derive(Parser)]
-#[command(version, about = "Mine FAIL_TO_PASS-validated Go tasks from git history")]
+#[command(version, about = "Mine FAIL_TO_PASS-validated Go tasks from git history, and agent struggles from session transcripts")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -100,6 +100,23 @@ enum Cmd {
     Gate {
         #[command(flatten)]
         stage: StageArgs,
+    },
+    /// Mine struggle episodes from Claude Code transcripts (no LLM; see traces.rs).
+    Traces {
+        /// The transcript root (one directory per project).
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Output directory; must be outside every git work tree.
+        #[arg(long)]
+        out: PathBuf,
+        /// Only episodes starting on or after this ISO date.
+        #[arg(long, default_value = "")]
+        since: String,
+        #[arg(long, default_value_t = 8)]
+        jobs: usize,
+        /// Skip transcripts whose path contains this (repeatable).
+        #[arg(long)]
+        exclude: Vec<String>,
     },
     /// Fairness stages 1-6 in order.
     Fairness {
@@ -223,6 +240,11 @@ fn main() -> Result<()> {
             let repo = repo.as_deref().map(canonical).transpose()?;
             fair::run_stage("specificity", &load(&stage)?, stage.jobs, stage.force,
                             |t| fair::specificity(repo.as_deref(), t))?;
+        }
+        Cmd::Traces { root, out, since, jobs, exclude } => {
+            let root = root.unwrap_or_else(rrsi_mine::traces::root_default);
+            let sum = rrsi_mine::traces::mine_traces(&root, &out, &since, jobs, &exclude)?;
+            println!("{}", serde_json::to_string_pretty(&sum)?);
         }
         Cmd::Gate { stage } => gate(&stage, &load(&stage)?)?,
         Cmd::Fairness { stage, repo, runs, go, llm } => {
