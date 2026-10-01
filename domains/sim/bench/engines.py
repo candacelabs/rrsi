@@ -125,9 +125,13 @@ class CpuEngine(Engine):
                "python", str(root / "examples" / "simulators" / "scenario_worker.py"),
                "--plant", "highway", "--jobs", str(jobs_path), "--output", str(out),
                "--run-id", run_id, "--runtime", CSF_RUNTIME]
+        # The worker imports the training runtime client and the generated
+        # protobuf contract from PYTHONPATH, as it does inside the CARLA image.
+        env = {**os.environ, "PYTHONPATH": os.pathsep.join(
+            [str(root / "examples" / "training"), str(root / "tools" / "codegen" / "generated" / "python")])}
         started = time.monotonic()
         with (out / "worker.log").open("w") as log:
-            code = subprocess.call(cmd, stdout=log, stderr=subprocess.STDOUT, timeout=BATCH_TIMEOUT)
+            code = subprocess.call(cmd, stdout=log, stderr=subprocess.STDOUT, timeout=BATCH_TIMEOUT, env=env)
         if not (out / "batch.json").is_file():
             raise InfraError(f"cpu worker exited {code} without batch.json (see {out / 'worker.log'})")
         batch = json.loads((out / "batch.json").read_text())
