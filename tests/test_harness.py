@@ -140,6 +140,65 @@ class HarnessMinerTest(unittest.TestCase):
         self.assertIn("acted=true replied=false retraction=true", sent)
         self.assertIn("other session: abcdef01", sent)
 
+    def test_pr_gap_mode_reports_measured_rules_and_runs_the_miner_with_github(self):
+        out = Path(self.tmp.name) / "pr-gap"
+        out.mkdir()
+        eps = corpus()
+        eps[0]["extra"] = {"outcome": "pushed_no_pr", "commits": 3, "commits_before_first_push": 2,
+                           "unpushed_at_end": 1, "commit_to_push_secs": 1440, "push_to_pr_secs": None, "brief": "defers"}
+        eps[1]["extra"] = {"phrases": ["don't open a separate pr"]}
+        (out / "episodes.jsonl").write_text("".join(json.dumps(e) + "\n" for e in eps))
+        dist = {"n": 2, "median": 1.0, "p90": 2.0, "max": 3.0}
+        pop = {"runs": 5, "active_runs": 4, "outcomes": {"pr_opened": 2, "pushed_no_pr": 1, "never_pushed": 1},
+               "gap_runs": 2, "github_said_no_pr_at_push": 1, "commit_to_push_min": dist, "push_to_pr_min": dist,
+               "commits_before_first_push": dist, "runs_with_unpushed_commits_at_end": 1}
+        rule = {"minutes": 5, "rule": "when an agent's first commit is 5 minutes old with no push, open a draft PR",
+                "fires": 3, "gaps_caught": 2, "nags": 1, "gaps_missed": 0, "score": 1}
+        summary = {"transcripts": 5, "processed": 5, "skipped_unchanged": 0, "sessions": 2, "projects": 1, "events": 50,
+                   "episodes": len(eps), "episodes_per_signal": {"pushed_no_pr": 20}, "hits_per_signal": {"pushed_no_pr": 20},
+                   "sessions_with_episodes": 2, "seconds": 0.1, "all": pop, "main_sessions": pop, "subagents": pop,
+                   "subagent_gap_by_brief": {"defers": [2, 2], "early": [2, 0]},
+                   "github": {"joined": True, "lookups": 3, "failed": 0, "pr_existing": 1,
+                              "pushed_no_pr": {"confirmed_no_pr": 1}},
+                   "rules": [rule], "top_rule": rule}
+        (out / "pr-gap-summary.json").write_text(json.dumps(summary))
+        fake = FakeModel()
+        run = M.mine(miner="pr-gap", out=out, skip_traces=True, complete=fake, batch=6, jobs=2, top=5,
+                     log=lambda _: None)
+        self.assertEqual(run["miner"], "pr-gap")
+        self.assertIn("trigger_rule", run["top"][0])
+        report = (out / "REPORT.md").read_text()
+        self.assertIn("# Agents without a PR: report", report)
+        self.assertIn("| subagents | 4 | 2 | 0 | 0 | 1 | 1 | 2 | 1 |", report)
+        self.assertIn("| defers | 2 | 2 | 100% |", report)
+        self.assertIn("| 5 | 3 | 2 | 1 | 0 | 1 |", report)
+        self.assertIn("**Top rule:** when an agent's first commit is 5 minutes old", report)
+        self.assertIn("1 confirmed with no PR", report)
+        sent = "\n".join(fake.prompts)
+        self.assertIn("run: outcome=pushed_no_pr commits=3 before_first_push=2", sent)
+        self.assertIn("phrases: don't open a separate pr", sent)
+        self.assertIn("always have a PR", M.MODES["pr-gap"].label_system)
+        self.assertEqual(M.MODES["pr-gap"].miner_args, ("--github",))
+
+    def test_run_miner_passes_mode_arguments(self):
+        seen = {}
+
+        class Done:
+            stdout = "{}"
+
+        def fake_run(cmd, **kw):
+            seen["cmd"] = cmd
+            return Done()
+
+        orig_run, orig_bin = M.subprocess.run, M.rust_binary
+        M.subprocess.run, M.rust_binary = fake_run, (lambda build=True: Path("/x/rrsi-mine"))
+        try:
+            M.run_miner("pr-gap", Path("/o"), None, "", 8, ["skip"], ("--github",))
+        finally:
+            M.subprocess.run, M.rust_binary = orig_run, orig_bin
+        self.assertEqual(seen["cmd"], ["/x/rrsi-mine", "pr-gap", "--out", "/o", "--jobs", "8", "--since", "",
+                                       "--github", "--exclude", "skip"])
+
     def test_rerun_is_cached(self):
         self.run_mine(FakeModel())
         fake = FakeModel()

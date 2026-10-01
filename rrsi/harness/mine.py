@@ -17,8 +17,10 @@
                                 [--backend sdk|copilot|codex] [--model M]
 
 Stage 1 (deterministic, Rust): a registered miner (`--miner traces`, the
-default, or `--miner handoffs`) writes OUT/episodes.jsonl; handoff tasks also
-carry a trigger rule ("when <condition>, message <owner> with <payload>").
+default, `--miner handoffs` or `--miner pr-gap`) writes OUT/episodes.jsonl;
+handoff and pr-gap tasks also carry a trigger rule ("when <condition>, message
+<owner> with <payload>"). pr-gap also scores its own rule family on the
+measured runs (OUT/pr-gap-summary.json, OUT/pr-gap-task.json).
 Stage 2 (LLM):
   label    batches of redacted episode digests -> one recurring-struggle
            pattern slug per episode (OUT/labels.jsonl; labelled episodes are
@@ -88,9 +90,10 @@ def rust_binary(build: bool = True) -> Path:
     return exe
 
 
-def run_miner(miner: str, out: Path, root: Path | None, since: str, jobs: int, exclude: list[str]) -> dict:
+def run_miner(miner: str, out: Path, root: Path | None, since: str, jobs: int, exclude: list[str],
+              extra: tuple[str, ...] = ()) -> dict:
     """Runs a registered `rrsi-mine` miner; its JSON summary comes back on stdout."""
-    cmd = [str(rust_binary()), miner, "--out", str(out), "--jobs", str(jobs), "--since", since]
+    cmd = [str(rust_binary()), miner, "--out", str(out), "--jobs", str(jobs), "--since", since, *extra]
     if root:
         cmd += ["--root", str(root)]
     for x in exclude:
@@ -145,6 +148,13 @@ def digest(ep: dict, n_ctx: int = 10, width: int = 220) -> str:
         lines.append(f"  outcome of message at event {o['event']}: from={'coordinator' if o['coordinator'] else 'peer'} "
                      f"acted={str(o['acted']).lower()} replied={str(o['replied']).lower()} "
                      f"retraction={str(o['retraction']).lower()}")
+    if extra.get("outcome"):
+        lines.append(f"  run: outcome={extra['outcome']} commits={extra.get('commits')} "
+                     f"before_first_push={extra.get('commits_before_first_push')} "
+                     f"unpushed_at_end={extra.get('unpushed_at_end')} commit_to_push_s={extra.get('commit_to_push_secs')} "
+                     f"push_to_pr_s={extra.get('push_to_pr_secs')} brief={extra.get('brief')}")
+    if extra.get("phrases"):
+        lines.append(f"  phrases: {redact(', '.join(map(str, extra['phrases'])))[:200]}")
     if extra.get("other_session"):
         lines.append(f"  other session: {str(extra['other_session'])[:8]} (project {redact(str(extra.get('other_project', '')))})")
     for i in sorted(keep)[:max(n_ctx, 1) * 2]:
@@ -335,6 +345,63 @@ TASK_SCHEMA = {
 }
 
 
+# ------------------------------------------------------------ pr-gap
+
+PR_GAP_LABEL_SYSTEM = """You study why actively working AI coding agents (Claude Code sessions and subagents, working for one operator whose rule is "actively working agents always have a PR") end up without a pushed branch or a pull request.
+Each episode is one of: a run (one agent transcript) that committed but never pushed (never_pushed), pushed with no PR (pushed_no_pr), pushed or opened its PR late (slow_push, slow_pr), or whose brief deferred the PR (brief_defers_pr); an orchestrator brief (Agent prompt) that defers or forbids the PR or the push (brief_defers_pr); or an operator turn correcting missing pushes/PRs (operator_pr_correction). The run line gives the measured outcome, commit counts, latencies and the brief class (defers / early / silent / none).
+For EVERY episode, name the recurring pattern it is an instance of:
+- pattern: a short lowercase snake_case slug for the generalizable cause, e.g. brief_defers_pr_to_end, brief_silent_on_pr, stacked_phase_branch_without_pr, pushes_into_orchestrator_branch, commits_left_unpushed_at_handoff, operator_demands_pr.
+- Use "noise" when no PR was expected (a scratch or benchmark repository, a branch merged by another PR on purpose, an instruction not about this agent's branch).
+- summary: one sentence on what happened and what would have produced a PR early. No names of people, hosts, secrets or private code.
+- harness_fixable: true if a brief rule, an operating rule or a watcher hook would plausibly have produced the PR."""
+
+PR_GAP_TASK_SYSTEM = f"""You turn one recurring cause of AI coding agents working without a pushed branch or a pull request into ONE actionable harness task.
+The harness is what surrounds the model: CLAUDE.md agent operating rules, the brief snippet orchestrators paste into subagent prompts, skills, memory files, lint gates, tools/CLI verbs, and watcher hooks.
+Above all, propose a TRIGGER RULE of the form "when <condition a hook can detect from git/GitHub state or the transcript>, <action> for <owner, and how it is resolved: the agent whose worktree branch it is, the orchestrator that wrote the brief, ...> with <payload>", e.g. "when an agent's first commit is N minutes old with no push, or a pushed branch has no PR, open a draft PR for it and tell the agent".
+proposed_fix.kind is one of {FIX_KINDS + ["ownership_hook"]}. priority: P0 (blocks work, frequent) .. P3 (rare/cosmetic).
+exam_candidate: checkable=true only when a before/after can be verified mechanically (e.g. replay a brief and check that a PR exists for the branch within the first push); describe before, after and the check.
+Write generally: no names of people, hosts, accounts, secrets or private code."""
+
+
+def pr_gap_section(s: dict) -> list[str]:
+    """The deterministic pr-gap measures: outcomes, latencies, briefs and the scored rules."""
+    def row(name: str, p: dict) -> str:
+        o = p["outcomes"]
+        return (f"| {name} | {p['active_runs']} | {o.get('pr_opened', 0)} | {o.get('pr_existing', 0)} | "
+                f"{o.get('pushed_default', 0)} | {o.get('pushed_no_pr', 0)} | {o.get('never_pushed', 0)} | "
+                f"{p['gap_runs']} | {p['runs_with_unpushed_commits_at_end']} |")
+    lines = ["", "### Runs (transcripts with at least one commit)", "",
+             "Gap = pushed_no_pr + never_pushed. pr_existing needs the GitHub join.", "",
+             "| Runs | Active | PR opened | PR existing | Pushed to main | Pushed, no PR | Never pushed | Gap | Unpushed at end |",
+             "|---|---|---|---|---|---|---|---|---|",
+             row("all", s["all"]), row("main sessions", s["main_sessions"]), row("subagents", s["subagents"]), "",
+             "| Latency (all active runs) | n | median | p90 | max |", "|---|---|---|---|---|"]
+    for k, label in (("commit_to_push_min", "first commit -> first push (min)"),
+                     ("push_to_pr_min", "first push -> PR created (min)"),
+                     ("commits_before_first_push", "commits before the first push")):
+        d = s["all"][k]
+        lines.append(f"| {label} | {d['n']} | {d['median']:.1f} | {d['p90']:.1f} | {d['max']:.1f} |")
+    lines += ["", "| Subagent brief | Active runs | Gap runs | Gap rate |", "|---|---|---|---|"]
+    for k, (n, g) in sorted(s.get("subagent_gap_by_brief", {}).items()):
+        lines.append(f"| {k} | {n} | {g} | {100 * g / n:.0f}% |" if n else f"| {k} | 0 | 0 | - |")
+    gh = s.get("github", {})
+    if gh.get("joined"):
+        c = gh.get("pushed_no_pr", {})
+        lines += ["", f"GitHub join: {gh['lookups']} lookups ({gh['failed']} failed); pushed_no_pr runs "
+                      f"{c.get('confirmed_no_pr', 0)} confirmed with no PR, {c.get('pr_opened_after_run', 0)} "
+                      f"got one after the run ended, {c.get('unresolved', 0)} unresolved; {gh['pr_existing']} runs "
+                      "pushed into a branch that already had a PR."]
+    lines += ["", "### Trigger rules scored on the runs", "",
+              "Fires = the rule would have triggered while the run was active; caught = it fired on a gap run; "
+              "nags = it fired on a run that got its PR later; score = caught - nags.", "",
+              "| N (min) | Fires | Gaps caught | Nags | Gaps missed | Score |", "|---|---|---|---|---|---|"]
+    for r in s.get("rules", []):
+        lines.append(f"| {r['minutes']} | {r['fires']} | {r['gaps_caught']} | {r['nags']} | {r['gaps_missed']} | {r['score']} |")
+    if s.get("top_rule"):
+        lines += ["", f"**Top rule:** {s['top_rule']['rule']}."]
+    return lines
+
+
 # ------------------------------------------------------------ handoffs
 
 HANDOFF_FIX_KINDS = FIX_KINDS + ["ownership_hook"]
@@ -478,7 +545,9 @@ def report(out: Path, run: dict, tasks: list[dict], labels: dict[str, dict], top
                   f"| Retractions / renames / voids | {pct(p['retractions'])} |",
                   f"| Messages sent (SendMessage / send_message) | {p['message_out_calls']} "
                   f"({p['message_out_failed']} failed) |"]
-    rules = mode.miner == "handoffs"
+    if "rules" in s and "all" in s:
+        lines += pr_gap_section(s)
+    rules = "trigger_rule" in mode.task_schema["properties"]
     lines += ["", f"## Top {min(top, len(tasks))} recurring {mode.unit}s", "",
               "Counts are measured from the episode records: an episode belongs to the cluster of its label.", "",
               f"| # | {mode.unit.capitalize()} | Episodes | Sessions | Projects | Main signals | Priority | Fix (kind) | "
@@ -526,6 +595,7 @@ class Mode:
     title: str
     unit: str
     out: Path
+    miner_args: tuple[str, ...] = ()
 
 
 MODES = {
@@ -533,6 +603,8 @@ MODES = {
                    "Harness struggles", "struggle", DEFAULT_OUT),
     "handoffs": Mode("handoffs", "handoffs-summary.json", HANDOFF_LABEL_SYSTEM, HANDOFF_TASK_SYSTEM,
                      HANDOFF_TASK_SCHEMA, "Agent handoffs", "coordination pattern", DEFAULT_OUT / "handoffs"),
+    "pr-gap": Mode("pr-gap", "pr-gap-summary.json", PR_GAP_LABEL_SYSTEM, PR_GAP_TASK_SYSTEM, HANDOFF_TASK_SCHEMA,
+                   "Agents without a PR", "PR-gap pattern", DEFAULT_OUT / "pr-gap", ("--github",)),
 }
 
 
@@ -563,7 +635,7 @@ def mine(out: Path | None = None, root: Path | None = None, since: str = "", bac
     t0 = time.time()
     secs = {}
     if not skip_traces:
-        summary = run_miner(mode.miner, out, root, since, 8, list(exclude or []) + ["rrsi-private"])
+        summary = run_miner(mode.miner, out, root, since, 8, list(exclude or []) + ["rrsi-private"], mode.miner_args)
     else:
         summary = json.loads((out / mode.summary_file).read_text())
     secs["miner"] = summary.get("seconds", 0.0)

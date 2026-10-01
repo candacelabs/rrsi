@@ -192,8 +192,21 @@ pub fn shell_ops(cmd: &str) -> (usize, usize, usize) {
     (commits, pushes, prs)
 }
 
-/// `(owner/repo, branch, github_said_no_pr)` per ref a push output updated.
-pub fn push_targets(out: &str) -> Vec<(String, String, bool)> {
+/// One branch a push updated.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Target {
+    /// `owner/repo` on GitHub; empty until resolved from `dir`.
+    pub repo: String,
+    pub branch: String,
+    /// GitHub answered "Create a pull request for ...": no PR at that push.
+    pub said_no_pr: bool,
+    /// The checkout the push ran in, for resolving `repo` from its origin.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub dir: String,
+}
+
+/// The targets a push output names (`To <repo>` and its ref-update lines).
+pub fn push_targets(out: &str) -> Vec<Target> {
     static TO: OnceLock<Regex> = OnceLock::new();
     static REF: OnceLock<Regex> = OnceLock::new();
     let to = TO.get_or_init(|| Regex::new(r"(?m)^To\s+\S*github\.com[:/]([^/\s]+)/([^/\s]+?)(?:\.git)?/?\s*$").expect("static regex"));
@@ -202,8 +215,40 @@ pub fn push_targets(out: &str) -> Vec<(String, String, bool)> {
     rf.captures_iter(out).map(|c| {
         let br = c[1].to_string();
         let said = out.contains(&format!("Create a pull request for '{br}'"));
-        (repo.clone(), br, said)
+        Target { repo: repo.clone(), branch: br, said_no_pr: said, dir: String::new() }
     }).collect()
+}
+
+/// The target of a push whose output was silenced (`-q`, `| tail`): the
+/// branch from its refspec (or `fallback_branch` for none / `HEAD`), the
+/// directory from `git -C` or the last `cd` before it (or `fallback_dir`).
+pub fn push_guess(cmd: &str, fallback_dir: &str, fallback_branch: &str) -> Option<Target> {
+    static CD: OnceLock<Regex> = OnceLock::new();
+    static DASH_C: OnceLock<Regex> = OnceLock::new();
+    let cd = CD.get_or_init(|| Regex::new(r"^cd\s+(\S+)").expect("static regex"));
+    let dash_c = DASH_C.get_or_init(|| Regex::new(r"git\s+-C\s+(\S+)").expect("static regex"));
+    let mut dir = fallback_dir.to_string();
+    for seg in segments(&shell_code(cmd)) {
+        if let Some(c) = cd.captures(&seg) {
+            dir = c[1].to_string();
+        }
+        let Some(("push", args)) = git_op(&seg) else { continue };
+        if let Some(c) = dash_c.captures(&seg) {
+            dir = c[1].to_string();
+        }
+        let pos: Vec<&str> = args.split_whitespace().filter(|w| !w.starts_with('-')).collect();
+        let refspec = pos.get(1).map(|r| r.rsplit(':').next().unwrap_or(r).trim_start_matches('+'))
+            .filter(|r| !r.is_empty() && *r != "HEAD");
+        let branch = refspec.map(|r| r.trim_start_matches("refs/heads/").to_string())
+            .unwrap_or_else(|| fallback_branch.to_string());
+        if branch.is_empty() || branch == "HEAD" {
+            return None;
+        }
+        let home = std::env::var("HOME").unwrap_or_default();
+        let dir = if dir.starts_with('~') { dir.replacen('~', &home, 1) } else { dir };
+        return Some(Target { repo: String::new(), branch, said_no_pr: false, dir });
+    }
+    None
 }
 
 pub fn pr_urls(out: &str) -> Vec<String> {
@@ -326,7 +371,7 @@ pub struct Step {
     pub kind: String,
     pub n: usize,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub targets: Vec<(String, String, bool)>,
+    pub targets: Vec<Target>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub urls: Vec<String>,
     pub text: String,
@@ -367,8 +412,8 @@ pub struct Run {
     pub commit_to_end_secs: Option<u64>,
     /// From the first push to the last event.
     pub push_to_end_secs: Option<u64>,
-    /// (owner/repo, branch, GitHub said "Create a pull request for ...").
-    pub pushed: Vec<(String, String, bool)>,
+    /// The branches pushed (merged by repo and branch).
+    pub pushed: Vec<Target>,
     pub pr_urls: Vec<String>,
     pub brief: Brief,
     pub brief_phrases: Vec<String>,
@@ -463,10 +508,14 @@ pub fn measure(bytes: &[u8], project: &str, file: &str) -> (Run, Vec<Moment>) {
                 let (err, out) = result_of(id).unwrap_or((true, String::new()));
                 let text = truncate(&format!("{} => {}", input.get("command").and_then(Value::as_str).unwrap_or(name),
                                              out.trim()), TEXT_MAX);
-                let targets = push_targets(&out);
+                let mut targets = push_targets(&out);
+                let cmd = input.get("command").and_then(Value::as_str).unwrap_or_default();
+                if targets.is_empty() && pushes > 0 && !err {
+                    targets.extend(push_guess(cmd, &e.cwd, &e.branch));
+                }
                 // An errored chained call: count only what its output proves.
                 let commits = if err { 0 } else { commits };
-                let pushes = if err && targets.is_empty() { 0 } else { pushes };
+                let pushes = if err && push_targets(&out).is_empty() { 0 } else { pushes };
                 let urls = pr_urls(&out);
                 let prs = if err { 0 } else { prs };
                 for (kind, n) in [("commit", commits), ("push", pushes), ("pr", prs)] {
@@ -516,12 +565,29 @@ pub fn fill(run: &mut Run, steps: Vec<Step>, end_t: u64) {
     run.push_to_pr_secs = at(fr).zip(at(fp)).map(|(r, p)| r.saturating_sub(p));
     run.commit_to_end_secs = at(first_commit).map(|c| end_t.saturating_sub(c));
     run.push_to_end_secs = at(fp).map(|p| end_t.saturating_sub(p));
-    let mut pushed: Vec<(String, String, bool)> = vec![];
+    let mut pushed: Vec<Target> = vec![];
     for s in steps.iter().filter(|s| s.kind == "push") {
         for t in &s.targets {
-            match pushed.iter_mut().find(|p| p.0 == t.0 && p.1 == t.1) {
-                Some(p) => p.2 |= t.2,
+            match pushed.iter_mut().find(|p| p.branch == t.branch && (p.repo == t.repo || p.repo.is_empty() || t.repo.is_empty())) {
+                Some(p) => {
+                    p.said_no_pr |= t.said_no_pr;
+                    if p.repo.is_empty() {
+                        p.repo = t.repo.clone();
+                    }
+                    if p.dir.is_empty() {
+                        p.dir = t.dir.clone();
+                    }
+                }
                 None => pushed.push(t.clone()),
+            }
+        }
+    }
+    // A silenced push in a run that named its repo elsewhere is that repo.
+    let named: Vec<String> = pushed.iter().map(|p| p.repo.clone()).filter(|r| !r.is_empty()).collect();
+    if named.len() == 1 || named.windows(2).all(|w| w[0] == w[1]) {
+        if let Some(r) = named.first() {
+            for p in pushed.iter_mut().filter(|p| p.repo.is_empty()) {
+                p.repo = r.clone();
             }
         }
     }
@@ -539,7 +605,7 @@ pub fn outcome(run: &Run, end_t: u64) -> Outcome {
         Outcome::PrOpened
     } else if run.github.iter().any(|g| iso_secs(&g.created_at).is_some_and(|c| c <= end_t)) {
         Outcome::PrExisting
-    } else if run.pushes > 0 && !run.pushed.is_empty() && run.pushed.iter().all(|p| DEFAULT_BRANCHES.contains(&p.1.as_str())) {
+    } else if run.pushes > 0 && !run.pushed.is_empty() && run.pushed.iter().all(|p| DEFAULT_BRANCHES.contains(&p.branch.as_str())) {
         Outcome::PushedDefault
     } else if run.pushes > 0 {
         Outcome::PushedNoPr
@@ -638,6 +704,15 @@ pub fn top_rule(scores: &[RuleScore]) -> Option<&RuleScore> {
 /// Looks up the PRs whose head is a branch.
 pub trait Github: Sync {
     fn prs_for_head(&self, repo: &str, branch: &str) -> Result<Vec<GithubPr>>;
+    /// `owner/repo` of a checkout's GitHub `origin`, if it still exists.
+    fn origin_repo(&self, dir: &str) -> Option<String>;
+}
+
+/// `owner/repo` from a GitHub remote URL.
+pub fn github_repo(url: &str) -> Option<String> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"github\.com[:/]([^/\s]+)/([^/\s]+?)(?:\.git)?/?$").expect("static regex"));
+    re.captures(url.trim()).map(|c| format!("{}/{}", &c[1], &c[2]))
 }
 
 /// `gh pr list --head` with the operator's own `gh` login.
@@ -652,15 +727,27 @@ impl Github for GhCli {
         let v: Vec<Value> = serde_json::from_slice(&out.stdout)?;
         Ok(v.iter().map(|p| GithubPr { url: field(p, "url"), created_at: field(p, "createdAt") }).collect())
     }
+    fn origin_repo(&self, dir: &str) -> Option<String> {
+        if dir.is_empty() || !Path::new(dir).is_dir() {
+            return None;
+        }
+        let out = std::process::Command::new("git").args(["-C", dir, "remote", "get-url", "origin"]).output().ok()?;
+        out.status.success().then(|| github_repo(&String::from_utf8_lossy(&out.stdout))).flatten()
+    }
 }
 
 /// Joins pushed branches against GitHub (cached in `cache`; a branch with no
 /// PR is asked again next time). Returns (lookups, failures).
 pub fn join_github(runs: &mut [Run], gh: &dyn Github, cache: &mut BTreeMap<String, Vec<GithubPr>>) -> (usize, usize) {
     let (mut asked, mut failed) = (0, 0);
+    let mut origins: BTreeMap<String, Option<String>> = BTreeMap::new();
     for run in runs.iter_mut().filter(|r| r.commits > 0 && r.prs_created == 0) {
+        for p in run.pushed.iter_mut().filter(|p| p.repo.is_empty()) {
+            p.repo = origins.entry(p.dir.clone()).or_insert_with(|| gh.origin_repo(&p.dir)).clone().unwrap_or_default();
+        }
         let mut found = vec![];
-        for (repo, br, _) in run.pushed.iter().filter(|p| !p.0.is_empty() && !DEFAULT_BRANCHES.contains(&p.1.as_str())) {
+        for (repo, br) in run.pushed.iter().filter(|p| !p.repo.is_empty() && !DEFAULT_BRANCHES.contains(&p.branch.as_str()))
+            .map(|p| (&p.repo, &p.branch)) {
             let key = format!("{repo}#{br}");
             if cache.get(&key).is_none_or(Vec::is_empty) {
                 asked += 1;
@@ -676,6 +763,21 @@ pub fn join_github(runs: &mut [Run], gh: &dyn Github, cache: &mut BTreeMap<Strin
         run.outcome = outcome(run, end_t);
     }
     (asked, failed)
+}
+
+/// How GitHub saw a `pushed_no_pr` run: `confirmed_no_pr` (no PR for any
+/// pushed branch, even now), `pr_opened_after_run` (someone opened one after
+/// the run ended) or `unresolved` (no pushed branch could be looked up).
+pub fn github_status(run: &Run, cache: &BTreeMap<String, Vec<GithubPr>>) -> &'static str {
+    let keys: Vec<String> = run.pushed.iter().filter(|p| !p.repo.is_empty() && !DEFAULT_BRANCHES.contains(&p.branch.as_str()))
+        .map(|p| format!("{}#{}", p.repo, p.branch)).filter(|k| cache.contains_key(k)).collect();
+    if keys.is_empty() {
+        "unresolved"
+    } else if keys.iter().any(|k| !cache[k].is_empty()) {
+        "pr_opened_after_run"
+    } else {
+        "confirmed_no_pr"
+    }
 }
 
 // --------------------------------------------------------------- episodes
@@ -778,11 +880,17 @@ pub fn episodes(run: &Run, moments: &[Moment], brief_text: &str) -> Vec<Episode>
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct FileState {
+    /// [`FORMAT`] of the cached record; another value re-parses the transcript.
+    #[serde(default)]
+    pub format: u32,
     pub mtime: u64,
     pub size: u64,
     pub hash: String,
     pub events: usize,
 }
+
+/// Bump when a cached per-transcript record changes shape or meaning.
+pub const FORMAT: u32 = 2;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct FileOut {
@@ -837,7 +945,7 @@ fn population<'a>(runs: impl Iterator<Item = &'a Run>) -> Population {
         p.active_runs += 1;
         *p.outcomes.entry(r.outcome.name()).or_insert(0) += 1;
         p.gap_runs += usize::from(r.outcome.is_gap());
-        p.github_said_no_pr_at_push += usize::from(r.pushed.iter().any(|x| x.2));
+        p.github_said_no_pr_at_push += usize::from(r.pushed.iter().any(|x| x.said_no_pr));
         c2p.extend(r.commit_to_push_secs);
         p2r.extend(r.push_to_pr_secs);
         before.push(r.commits_before_first_push as u64);
@@ -876,14 +984,15 @@ fn process(root: &Path, out: &Path, rel: &str, prev: Option<&FileState>) -> Resu
     let path = root.join(rel);
     let (mtime, size) = mtime_size(&path)?;
     let outfile = out.join("files").join(format!("{}.json", file_key(rel)));
-    if let Some(p) = prev.filter(|_| outfile.exists()) {
+    let prev = prev.filter(|p| p.format == FORMAT && outfile.exists());
+    if let Some(p) = prev {
         if p.mtime == mtime && p.size == size {
             return Ok((p.clone(), false));
         }
     }
     let bytes = std::fs::read(&path)?;
     let hash = format!("{:016x}", fnv64(&bytes));
-    if let Some(p) = prev.filter(|p| p.hash == hash && outfile.exists()) {
+    if let Some(p) = prev.filter(|p| p.hash == hash) {
         return Ok((FileState { mtime, size, ..p.clone() }, false));
     }
     let project = rel.split('/').next().unwrap_or_default();
@@ -891,7 +1000,7 @@ fn process(root: &Path, out: &Path, rel: &str, prev: Option<&FileState>) -> Resu
     let brief = if run.subagent { truncate(&first_prompt(&bytes), BRIEF_MAX) } else { String::new() };
     let events = run.events;
     std::fs::write(&outfile, serde_json::to_string(&FileOut { run, moments, brief })?)?;
-    Ok((FileState { mtime, size, hash, events }, true))
+    Ok((FileState { format: FORMAT, mtime, size, hash, events }, true))
 }
 
 pub fn mine_pr_gap(root: &Path, out: &Path, since: &str, jobs: usize, exclude: &[String],
@@ -960,10 +1069,13 @@ pub fn mine_pr_gap(root: &Path, out: &Path, since: &str, jobs: usize, exclude: &
                 .and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
             let (asked, failed) = join_github(&mut runs, gh, &mut cache);
             std::fs::write(&cache_path, serde_json::to_string_pretty(&cache)?)?;
-            let confirmed = runs.iter().filter(|r| r.outcome == Outcome::PushedNoPr).count();
+            let mut c = BTreeMap::<&str, usize>::new();
+            for r in runs.iter().filter(|r| r.outcome == Outcome::PushedNoPr) {
+                *c.entry(github_status(r, &cache)).or_insert(0) += 1;
+            }
             json!({"joined": true, "lookups": asked, "failed": failed, "branches_cached": cache.len(),
-                   "pushed_no_pr_confirmed": confirmed,
-                   "pr_existing": runs.iter().filter(|r| r.outcome == Outcome::PrExisting).count()})
+                   "pr_existing": runs.iter().filter(|r| r.outcome == Outcome::PrExisting).count(),
+                   "pushed_no_pr": c})
         }
         None => json!({"joined": false}),
     };

@@ -13,7 +13,7 @@
 # limitations under the License.
 """`python -m rrsi harness mine ...` (the RRSI loop itself stays in rrsi.py).
 
-    python -m rrsi harness mine [--miner traces|handoffs] [--out DIR] [--root ~/.claude/projects]
+    python -m rrsi harness mine [--miner traces|handoffs|pr-gap] [--out DIR] [--root ~/.claude/projects]
         [--since 2026-09-01] [--backend sdk|copilot|codex] [--model M] [--jobs 4]
         [--batch 25] [--top 20] [--skip-traces]
 """
@@ -33,9 +33,10 @@ def main(argv=None) -> int:
     from rrsi.harness.llm import BACKENDS
     from rrsi.harness.mine import MODES
     m.add_argument("--miner", choices=sorted(MODES), default="traces",
-                   help="traces: struggles; handoffs: cross-session coordination with trigger rules")
+                   help="traces: struggles; handoffs: cross-session coordination with trigger rules; "
+                        "pr-gap: active agents without a pushed branch or PR (joins GitHub)")
     m.add_argument("--out", type=Path, default=None,
-                   help="outside every git work tree; default ~/rrsi-private/harness[/handoffs]")
+                   help="outside every git work tree; default ~/rrsi-private/harness[/handoffs|/pr-gap]")
     m.add_argument("--root", type=Path, default=None, help="default ~/.claude/projects")
     m.add_argument("--since", default="", help="only episodes on/after this ISO date")
     m.add_argument("--backend", choices=BACKENDS, default="sdk")

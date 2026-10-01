@@ -67,6 +67,10 @@ impl T {
     }
 }
 
+fn tgt(repo: &str, branch: &str, said: bool) -> Target {
+    Target { repo: repo.into(), branch: branch.into(), said_no_pr: said, dir: String::new() }
+}
+
 const NEW_BRANCH: &str = "remote:\nremote: Create a pull request for 'feat/x' on GitHub by visiting:\nremote:      https://github.com/acme/widgets/pull/new/feat/x\nremote:\nTo github.com:acme/widgets.git\n * [new branch]      feat/x -> feat/x";
 const UPDATE: &str = "To https://github.com/acme/widgets.git\n   1a2b3c4..5d6e7f8  feat/x -> feat/x";
 
@@ -98,10 +102,35 @@ fn pr_creation_forms() {
 
 #[test]
 fn push_output_names_repo_branch_and_whether_github_saw_no_pr() {
-    assert_eq!(push_targets(NEW_BRANCH), vec![("acme/widgets".into(), "feat/x".into(), true)]);
-    assert_eq!(push_targets(UPDATE), vec![("acme/widgets".into(), "feat/x".into(), false)]);
+    assert_eq!(push_targets(NEW_BRANCH), vec![tgt("acme/widgets", "feat/x", true)]);
+    assert_eq!(push_targets(UPDATE), vec![tgt("acme/widgets", "feat/x", false)]);
     assert!(push_targets("Everything up-to-date").is_empty());
     assert!(push_targets("To github.com:acme/widgets.git\n ! [rejected]        feat/x -> feat/x (fetch first)").is_empty());
+}
+
+#[test]
+fn silenced_pushes_are_guessed_from_refspec_directory_and_branch() {
+    let g = push_guess("cd /w/other && git push -q origin feat/y 2>&1 | tail -3", "/w/repo", "feat/x").unwrap();
+    assert_eq!((g.dir.as_str(), g.branch.as_str(), g.repo.as_str()), ("/w/other", "feat/y", ""));
+    let g = push_guess("git -C /w/third push -u origin HEAD", "/w/repo", "feat/x").unwrap();
+    assert_eq!((g.dir.as_str(), g.branch.as_str()), ("/w/third", "feat/x"));
+    assert_eq!(push_guess("git push origin local:refs/heads/remote-name", "/w", "b").unwrap().branch, "remote-name");
+    assert!(push_guess("git push", "/w", "").is_none(), "no branch known");
+    assert!(push_guess("git status", "/w", "b").is_none());
+    assert_eq!(github_repo("git@github.com:acme/widgets.git\n").as_deref(), Some("acme/widgets"));
+    assert_eq!(github_repo("https://github.com/acme/widgets").as_deref(), Some("acme/widgets"));
+    assert!(github_repo("https://gitlab.com/acme/widgets").is_none());
+}
+
+#[test]
+fn a_silenced_push_takes_the_repo_named_by_another_push() {
+    let mut t = T::sub("s6", "Fix it.");
+    t.bash("1", "git commit -qm a && git push -u origin feat/x", false, NEW_BRANCH)
+        .bash("2", "git commit -qm b && git push -q", false, "");
+    let (run, _) = t.measure("proj/s6/subagents/agent-a6.jsonl");
+    assert_eq!(run.pushes, 2);
+    assert_eq!(run.pushed.len(), 1, "{:?}", run.pushed);
+    assert_eq!((run.pushed[0].repo.as_str(), run.pushed[0].said_no_pr), ("acme/widgets", true));
 }
 
 #[test]
@@ -137,7 +166,7 @@ fn subagent_that_pushed_late_and_never_opened_a_pr() {
     assert_eq!((run.commits, run.commits_before_first_push, run.unpushed_at_end, run.pushes, run.prs_created), (3, 2, 1, 1, 0));
     assert_eq!(run.commit_to_push_secs, Some(24 * 60));
     assert_eq!(run.brief, Brief::Defers);
-    assert_eq!(run.pushed, vec![("acme/widgets".into(), "feat/x".into(), true)]);
+    assert_eq!(run.pushed, vec![tgt("acme/widgets", "feat/x", true)]);
     assert_eq!(run.outcome, Outcome::PushedNoPr);
     assert_eq!(run_signals(&run), vec![Signal::PushedNoPr, Signal::SlowPush, Signal::BriefDefersPr]);
 }
@@ -243,6 +272,10 @@ impl Github for FakeGithub {
         }
         Ok(self.prs.get(&format!("{repo}#{branch}")).cloned().unwrap_or_default())
     }
+    fn origin_repo(&self, dir: &str) -> Option<String> {
+        self.asked.lock().unwrap().push(format!("origin {dir}"));
+        (dir == "/w/widgets").then(|| "acme/widgets".to_string())
+    }
 }
 
 #[test]
@@ -250,16 +283,24 @@ fn github_join_confirms_gaps_and_finds_prs_opened_by_others() {
     let pr = GithubPr { url: "https://github.com/acme/widgets/pull/3".into(), created_at: "2026-01-01T00:10:00Z".into() };
     let gh = FakeGithub { prs: [("acme/widgets#feat/x".to_string(), vec![pr.clone()])].into(), asked: Mutex::new(vec![]) };
     let base = |repo: &str, end: &str| Run { commits: 1, pushes: 1, end: end.into(), outcome: Outcome::PushedNoPr,
-                                            pushed: vec![(repo.into(), "feat/x".into(), false)], ..Run::default() };
+                                            pushed: vec![tgt(repo, "feat/x", false)], ..Run::default() };
+    let mut silenced = base("", "2026-01-01T00:30:00Z");
+    silenced.pushed[0].dir = "/w/widgets".into();
+    let mut gone = base("", "2026-01-01T00:30:00Z");
+    gone.pushed[0].dir = "/w/deleted".into();
     let mut runs = vec![base("acme/widgets", "2026-01-01T00:30:00Z"), base("acme/widgets", "2026-01-01T00:05:00Z"),
-                        base("acme/other", "2026-01-01T00:30:00Z"), base("acme/broken", "2026-01-01T00:30:00Z")];
+                        base("acme/other", "2026-01-01T00:30:00Z"), base("acme/broken", "2026-01-01T00:30:00Z"),
+                        silenced, gone];
     let mut cache = BTreeMap::new();
     let (asked, failed) = join_github(&mut runs, &gh, &mut cache);
     assert_eq!((asked, failed), (3, 1), "a found PR is cached; empty and failed lookups are asked again");
     let outs: Vec<_> = runs.iter().map(|r| r.outcome).collect();
-    assert_eq!(outs, [Outcome::PrExisting, Outcome::PushedNoPr, Outcome::PushedNoPr, Outcome::PushedNoPr],
+    assert_eq!(outs, [Outcome::PrExisting, Outcome::PushedNoPr, Outcome::PushedNoPr, Outcome::PushedNoPr,
+                      Outcome::PrExisting, Outcome::PushedNoPr],
                "a PR created after the run ended does not excuse it");
     assert_eq!(runs[0].github, vec![pr]);
+    let status: Vec<_> = runs.iter().map(|r| github_status(r, &cache)).collect();
+    assert_eq!(status, ["pr_opened_after_run", "pr_opened_after_run", "confirmed_no_pr", "unresolved", "pr_opened_after_run", "unresolved"]);
     join_github(&mut runs, &gh, &mut cache);
     assert_eq!(gh.asked.lock().unwrap().iter().filter(|k| *k == "acme/widgets#feat/x").count(), 1);
 }
