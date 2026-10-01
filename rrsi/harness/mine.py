@@ -52,6 +52,7 @@ DEFAULT_OUT = Path.home() / "rrsi-private" / "harness"
 FIX_KINDS = ["claude_md_rule", "skill", "house_lint_gate", "memory", "tool_cli_fix", "doc"]
 PRIORITIES = ["P0", "P1", "P2", "P3"]
 NOISE = "noise"
+RETRIES = 1
 
 # (backend-agnostic) system, prompt, schema, cwd -> dict
 Complete = Callable[[str, str, dict, Path], dict]
@@ -461,7 +462,15 @@ def mine(out: Path = DEFAULT_OUT, root: Path | None = None, since: str = "", bac
     model = model or DEFAULT_MODEL.get(backend, "")
     if complete is None:
         def complete(system, prompt, schema, o):
-            return complete_json(backend, model, system, prompt, schema, ensure_private(o / "llm-cwd"), effort)
+            for attempt in range(RETRIES + 1):  # one retry for a malformed reply
+                try:
+                    return complete_json(backend, model, system, prompt, schema,
+                                         ensure_private(o / "llm-cwd"), effort)
+                except LLMAuthError:
+                    raise
+                except LLMError:
+                    if attempt == RETRIES:
+                        raise
     t0 = time.time()
     secs = {}
     if not skip_traces:

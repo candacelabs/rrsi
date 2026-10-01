@@ -167,6 +167,8 @@ class HarnessMinerTest(unittest.TestCase):
     def test_parse_json_accepts_fenced_and_bare(self):
         self.assertEqual(parse_json('text ```json\n{"a": 1}\n``` more'), {"a": 1})
         self.assertEqual(parse_json('noise {"a": {"b": 2}} tail'), {"a": {"b": 2}})
+        # literal newlines in strings and prose after the object (seen from CLI backends)
+        self.assertEqual(parse_json('{"a": "x\ny"} then } more'), {"a": "x\ny"})
         with self.assertRaises(LLMError):
             parse_json("no json here")
 

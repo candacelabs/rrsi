@@ -53,11 +53,15 @@ def _raise(msg: str) -> None:
 def parse_json(text: str) -> dict:
     """The first JSON object in `text` (fenced or bare)."""
     m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.S)
-    cand = m.group(1) if m else text[text.find("{"): text.rfind("}") + 1]
-    try:
-        out = json.loads(cand)
-    except json.JSONDecodeError as e:
-        raise LLMError(f"reply is not JSON: {text[:200]!r}") from e
+    out = None
+    for cand in ([m.group(1)] if m else []) + [text[text.find("{"):]]:
+        try:  # raw_decode ignores trailing prose after the object
+            out = json.JSONDecoder(strict=False).raw_decode(cand)[0]
+            break
+        except json.JSONDecodeError:
+            continue
+    if out is None:
+        raise LLMError(f"reply is not JSON: {text[:200]!r}")
     if not isinstance(out, dict):
         raise LLMError("reply is not a JSON object")
     return out
