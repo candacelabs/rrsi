@@ -19,6 +19,7 @@ Runs on the dependency-free fake backend. With RRSI_SIM_CSF_RUNTIME set to the
 CSF Go runtime, the fake controller semantics are also compared with it.
 """
 
+import hashlib
 import json
 import math
 import os
@@ -38,14 +39,17 @@ from rrsi.domain import load_domain as _load_domain  # noqa: E402
 # Every domain names its modules harness/render/briefs/run_tasks; one pytest
 # process holds several domains, so this file imports the sim modules and then
 # returns sys.path and sys.modules to their previous state.
-_SHARED = ("harness", "render", "briefs", "run_tasks", "backends", "oracles", "fake_backend", "scenarios")
+_SHARED = ("harness", "render", "briefs", "run_tasks", "backends", "oracles", "fake_backend", "scenarios",
+           "heldout_vehicle", "heldout_physics", "phys_worker", "agreement")
 _SAVED = {n: m for n, m in sys.modules.items() if n.split(".")[0] in _SHARED}
 for _name in _SAVED:
     del sys.modules[_name]
 _PATH, _MODULES = list(sys.path), set(sys.modules)
-sys.path[:0] = [str(SIM), str(SIM / "bench"), str(SIM / "data")]
+sys.path[:0] = [str(SIM), str(SIM / "bench"), str(SIM / "data"), str(SIM / "grader")]
 import backends                      # noqa: E402
 import fake_backend                  # noqa: E402
+import heldout_physics               # noqa: E402
+import heldout_vehicle               # noqa: E402
 import oracles                      # noqa: E402
 import run_tasks                    # noqa: E402
 import scenarios                    # noqa: E402
@@ -353,3 +357,172 @@ def test_any_command_honouring_the_contract_is_an_backend(tmp_path):
             jobs, tmp_path / "out2", "r2")
     with pytest.raises(backends.InfraError):
         backends.CommandBackend("none", [])
+
+
+# ---- held-out physics (the `phys` simulator backend) ----------------------
+
+# A fixture, not a secret: campaign salts live in an owner-only file outside
+# the repository and are never committed.
+FIXTURE_SALT = hashlib.sha256(b"rrsi-sim-test-salt-not-secret").digest()
+PINNED_PHYSICS_SHA256 = "9a61ac9998799b594cb0e056fdb00c69cb27f07576603274784ea70b66efe883"
+REFERENCE = controller(-250, -500, 500, name="csf-reference")
+AGGRESSIVE = controller(-1500, -800, 800, name="aggressive")
+
+
+def salt_file(tmp_path, salt=FIXTURE_SALT, mode=0o600, name="salt"):
+    path = tmp_path / name
+    path.write_text(salt.hex() + "\n")
+    path.chmod(mode)
+    return path
+
+
+def phys_jobs(ids, trials=(0,), c=REFERENCE):
+    return [{"id": f"{t}--t{i}", "scenario": scenarios.BY_ID[t]["scenario"],
+             "goal_metres": scenarios.BY_ID[t]["goal_metres"], "controller": c} for t in ids for i in trials]
+
+
+def phys_backend(monkeypatch, path, runtime=""):
+    monkeypatch.setattr(backends, "_PHYS_SALT_FILE", str(path))
+    monkeypatch.setattr(backends, "CSF_RUNTIME", runtime)
+    return backends.get("phys")
+
+
+def graded_reward(task_id, trial, c, salt=FIXTURE_SALT, scale=1.0, tmp=None):
+    """One graded episode in process (the worker's loop, mirror runtime)."""
+    task = scenarios.BY_ID[task_id]
+    physics, noise_seed = heldout_physics.draw(salt, f"{task_id}--t{trial}", scale)
+    job = {"id": "g", "scenario": task["scenario"], "goal_metres": task["goal_metres"], "controller": c}
+    out = tmp / f"{task_id}-{trial}-{c['name']}"
+    fake_backend.run_episode(job, out, "r", plant_factory=lambda sc: heldout_vehicle.HeldoutVehicle(
+        sc, physics, random.Random(noise_seed)))
+    return oracles.grade(out, task)["reward"], out
+
+
+def test_the_physics_draw_is_pinned_and_keyed_by_episode_id():
+    physics, noise_seed = heldout_physics.draw(FIXTURE_SALT, "straight-100--t0")
+    assert heldout_physics.physics_sha256(physics, noise_seed) == PINNED_PHYSICS_SHA256, "physics-v1 drifted"
+    assert heldout_physics.draw(FIXTURE_SALT, "straight-100--t0") == (physics, noise_seed)
+    hashes = {heldout_physics.physics_sha256(*heldout_physics.draw(FIXTURE_SALT, f"{t}--t{i}"))
+              for t in scenarios.EVOLVE + scenarios.HELDOUT_IDS for i in range(3)}
+    assert len(hashes) == 96, "every episode id gets its own vehicle"
+    other = heldout_physics.draw(b"another-fixture-salt-of-32-bytes", "straight-100--t0")
+    assert heldout_physics.physics_sha256(*other) != PINNED_PHYSICS_SHA256
+    assert physics != heldout_vehicle.NOMINAL
+
+
+def test_scale_zero_is_nominal_with_the_same_noise_seed():
+    physics, noise_seed = heldout_physics.draw(FIXTURE_SALT, "straight-105--t2", scale=0)
+    assert physics == heldout_vehicle.NOMINAL
+    assert noise_seed == heldout_physics.draw(FIXTURE_SALT, "straight-105--t2")[1]
+    assert [name for name, *_ in heldout_physics.RANGES][:3] == ["mass_kg", "inertia_factor", "front_axle_metres"]
+    assert len(heldout_physics.RANGES) == 21
+
+
+def test_graded_dynamics_differ_from_the_preview_for_a_fixed_draw(tmp_path):
+    task = scenarios.PRACTICE[4]
+    job = {"id": "p", "scenario": task["scenario"], "goal_metres": task["goal_metres"], "controller": REFERENCE}
+    fake_backend.run_episode(job, tmp_path / "preview", "r")
+    preview = [json.loads(x)["state"] for x in (tmp_path / "preview" / "trace.jsonl").read_text().splitlines()]
+    for scale in (0.0, 1.0):
+        _, out = graded_reward(task["id"], 0, REFERENCE, scale=scale, tmp=tmp_path / f"s{scale}")
+        graded = [json.loads(x)["state"] for x in (out / "trace.jsonl").read_text().splitlines()]
+        gap = max(abs(a["lateral_metres"] - b["lateral_metres"]) for a, b in zip(preview, graded))
+        assert gap > 1e-3, f"scale {scale}: the graded vehicle must not be the preview's"
+    # The same draw replays the same graded episode.
+    first = (graded_reward(task["id"], 1, REFERENCE, tmp=tmp_path / "a")[1] / "trace.jsonl").read_text()
+    again = (graded_reward(task["id"], 1, REFERENCE, tmp=tmp_path / "b")[1] / "trace.jsonl").read_text()
+    assert first == again
+
+
+def test_phys_backend_pairs_episodes_by_id_not_by_run_or_order(tmp_path, monkeypatch):
+    backend = phys_backend(monkeypatch, salt_file(tmp_path))
+    jobs = phys_jobs(scenarios.EVOLVE[:3], trials=(0, 1)) + phys_jobs(scenarios.HELDOUT_IDS[:1])
+    backend.execute(jobs, tmp_path / "one", "run-one")
+    backend.execute(list(reversed(jobs)), tmp_path / "two", "run-two-later")
+    for job in jobs:
+        a, b = tmp_path / "one" / job["id"], tmp_path / "two" / job["id"]
+        assert (a / "trace.jsonl").read_bytes() == (b / "trace.jsonl").read_bytes()
+        ma, mb = (json.loads((d / "manifest.json").read_text()) for d in (a, b))
+        assert ma["status"] == "completed" and ma["simulator"]["physics_sha256"] == mb["simulator"]["physics_sha256"]
+        assert ma["simulator"]["distribution"] == "physics-v1" and ma["simulator"]["name"] == "phys"
+    shas = {json.loads((tmp_path / "one" / j["id"] / "manifest.json").read_text())["simulator"]["physics_sha256"]
+            for j in jobs}
+    assert len(shas) == len(jobs)
+
+
+def test_grader_output_never_holds_the_salt_or_the_drawn_values(tmp_path, monkeypatch):
+    backend = phys_backend(monkeypatch, salt_file(tmp_path))
+    jobs = phys_jobs(scenarios.EVOLVE[:4], trials=(0, 2)) + phys_jobs(scenarios.HELDOUT_IDS[:2], c=AGGRESSIVE)
+    backend.execute(jobs, tmp_path / "out", "r")
+    text = "\n".join(p.read_text() for p in sorted((tmp_path / "out").rglob("*")) if p.is_file())
+    forbidden = [FIXTURE_SALT.hex(), "mass_kg", "tyre_friction", "cornering", "noise_seed", "steer_rate"]
+    for job in jobs:
+        physics, noise_seed = heldout_physics.draw(FIXTURE_SALT, job["id"])
+        forbidden += [repr(physics.mass_kg), repr(physics.tyre_friction), repr(physics.front_cornering_n_per_rad),
+                      repr(physics.steer_gain), str(noise_seed)]
+    assert not [f for f in forbidden if f in text]
+    manifest = json.loads((tmp_path / "out" / jobs[0]["id"] / "manifest.json").read_text())
+    assert manifest["simulator"]["salt_id"] == heldout_physics.salt_id(FIXTURE_SALT)
+    assert len(manifest["simulator"]["physics_sha256"]) == 64
+
+
+def test_physics_v1_is_fair_to_the_reference_and_punishes_aggressive_gains(tmp_path):
+    ids = scenarios.EVOLVE + scenarios.HELDOUT_IDS
+    reference = [graded_reward(t, i, REFERENCE, tmp=tmp_path)[0] for t in ids for i in range(5)]
+    aggressive = [graded_reward(t, i, AGGRESSIVE, tmp=tmp_path)[0] for t in ids for i in range(5)]
+    assert sum(reference) / len(reference) >= 0.98
+    assert sum(aggressive) / len(aggressive) <= sum(reference) / len(reference) - 0.2
+
+
+def test_phys_backend_refuses_a_missing_or_weak_salt(tmp_path, monkeypatch):
+    for path, why in ((tmp_path / "absent", "unreadable"),
+                      (salt_file(tmp_path, mode=0o644, name="open"), "owner"),
+                      (salt_file(tmp_path, salt=b"short", name="short"), "64 hex")):
+        monkeypatch.setattr(backends, "_PHYS_SALT_FILE", str(path))
+        with pytest.raises(SystemExit, match=why):
+            backends.get("phys")
+    monkeypatch.setattr(backends, "_PHYS_SALT_FILE", "")
+    with pytest.raises(SystemExit, match="unset"):
+        backends.get("phys")
+    # A worker started without the salt never writes a verdict-bearing batch.
+    worker = backends.CommandBackend("phys", [sys.executable, str(SIM / "grader" / "phys_worker.py")],
+                                     {"RRSI_SIM_PHYS_SALT_FILE": ""})
+    with pytest.raises(backends.InfraError, match="without batch.json"):
+        worker.execute(phys_jobs(scenarios.EVOLVE[:1]), tmp_path / "out", "r")
+    assert not (tmp_path / "out" / f"{scenarios.EVOLVE[0]}--t0").exists()
+
+
+def test_phys_backend_refuses_episodes_that_are_not_graded_trials(tmp_path, monkeypatch):
+    backend = phys_backend(monkeypatch, salt_file(tmp_path))
+    task = scenarios.PRACTICE[0]
+    jobs = [{"id": "rollout", "scenario": task["scenario"], "goal_metres": task["goal_metres"],
+             "controller": REFERENCE}, *phys_jobs(scenarios.EVOLVE[:1])]
+    backend.execute(jobs, tmp_path / "out", "r")
+    assert oracles.grade(tmp_path / "out" / "rollout", task)["status"] == "infra"
+    assert oracles.grade(tmp_path / "out" / jobs[1]["id"], task)["status"] == "ok"
+
+
+def test_the_preview_is_never_the_phys_grader(tmp_path, monkeypatch):
+    monkeypatch.setattr(backends, "BACKEND", "phys")
+    monkeypatch.delenv("RRSI_SIM_SURROGATE", raising=False)
+    assert backends.surrogate_name() == "fake"
+    monkeypatch.setenv("RRSI_SIM_SURROGATE", "phys")
+    with pytest.raises(SystemExit, match="cannot serve as the rollout preview"):
+        backends.surrogate_name()
+    monkeypatch.setenv("RRSI_SIM_SURROGATE", "none")
+    assert backends.surrogate_name() == "none"
+    _, rollout = run_tasks.make_tools(scenarios.PRACTICE[0], backends.get("none"), tmp_path)
+    assert rollout(REFERENCE) == {"error": "surrogate unavailable: preview disabled"}
+
+
+@pytest.mark.skipif(not os.environ.get("RRSI_SIM_CSF_RUNTIME"), reason="needs the CSF Go runtime")
+def test_phys_go_runtime_matches_the_mirror(tmp_path, monkeypatch):
+    path = salt_file(tmp_path)
+    jobs = phys_jobs(scenarios.EVOLVE[:3], trials=(0,)) + phys_jobs(scenarios.HELDOUT_IDS[:3], c=AGGRESSIVE)
+    phys_backend(monkeypatch, path).execute(jobs, tmp_path / "mirror", "r")
+    phys_backend(monkeypatch, path, os.environ["RRSI_SIM_CSF_RUNTIME"]).execute(jobs, tmp_path / "go", "r")
+    for job in jobs:
+        a, b = tmp_path / "mirror" / job["id"], tmp_path / "go" / job["id"]
+        assert (a / "trace.jsonl").read_bytes() == (b / "trace.jsonl").read_bytes()
+        manifest = json.loads((b / "manifest.json").read_text())
+        assert manifest["simulator"]["controller_runtime"] == "csf-go" and manifest["controller_hash"]

@@ -45,6 +45,21 @@ the domain. RRSI_SIM_BACKEND selects one:
            the operator CLI of the monorepo that hosts CSF; RRSI_SIM_CANDACE).
            Needs the GPU to itself; peak VRAM is sampled with nvidia-smi
            during the batch and saved as vram.json.
+  phys     a `command` preset: grader/phys_worker.py, the held-out-physics
+           grader. Every graded episode runs a dynamic single-track vehicle
+           whose parameters are drawn per episode from a secret salt
+           (RRSI_SIM_PHYS_SALT_FILE, a file outside the repository) and the
+           episode id; the controller runs in the CSF Go runtime when
+           RRSI_SIM_CSF_RUNTIME is set. CPU only. See README "Held-out physics".
+  none     no simulator: every batch is infra. Only as the rollout surrogate,
+           to switch the preview off for an ablation.
+
+The agent's `rollout` tool runs one episode on a surrogate backend
+(`surrogate_name`): RRSI_SIM_SURROGATE, or `cpu` when grading on CARLA, or
+`fake`. The `fake` bicycle is identical to the HighwayEnv plant the `cpu`
+backend grades on, so on `cpu` the preview reveals the grade exactly; on
+`phys` it is the nominal kinematic model and the grade is not. `phys` can
+never be the surrogate.
 
 `check` is the admission test behind the agent's `check` tool: the CSF Go
 runtime's compile when RRSI_SIM_CSF_RUNTIME is set, otherwise the fake mirror.
@@ -57,6 +72,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -68,6 +84,11 @@ CSF_ROOT = os.environ.get("RRSI_SIM_CSF_ROOT", "")
 CSF_RUNTIME = os.environ.get("RRSI_SIM_CSF_RUNTIME", "")
 CANDACE = os.environ.get("RRSI_SIM_CANDACE", "candace")
 BATCH_TIMEOUT = float(os.environ.get("RRSI_SIM_BATCH_TIMEOUT", "3600"))
+# Captured at import: the runner removes it from its own environment before
+# any harness code runs, and only the grading process passes it on.
+_PHYS_SALT_FILE = os.environ.get("RRSI_SIM_PHYS_SALT_FILE", "")
+SIM = Path(__file__).resolve().parent.parent
+BACKENDS = ("fake", "command", "cpu", "carla", "phys", "none")
 
 
 class InfraError(RuntimeError):
@@ -217,6 +238,41 @@ def cpu_backend() -> CommandBackend:
                                  "--plant", "highway", "--runtime", CSF_RUNTIME], env)
 
 
+class NoneBackend(Backend):
+    """No simulator: the preview-off ablation's surrogate."""
+
+    name = "none"
+
+    def execute(self, jobs, out, run_id):
+        raise InfraError("preview disabled")
+
+
+def salt_problem(path: str) -> str:
+    """Why the phys salt file is unusable, or "". Only stats the file: the
+    process that checks it never reads the salt."""
+    if not path:
+        return "RRSI_SIM_PHYS_SALT_FILE is unset"
+    try:
+        info = os.stat(path)
+    except OSError as error:
+        return f"salt file unreadable: {error.strerror}"
+    if info.st_mode & 0o077:
+        return "salt file must be readable only by its owner (chmod 600)"
+    if info.st_size < 64:
+        return "salt file must hold at least 64 hex digits"
+    return ""
+
+
+def phys_backend() -> CommandBackend:
+    problem = salt_problem(_PHYS_SALT_FILE)
+    if problem:
+        raise SystemExit(f"phys simulator backend: {problem}")
+    argv = [sys.executable, str(SIM / "grader" / "phys_worker.py")]
+    if CSF_RUNTIME:
+        argv += ["--runtime", CSF_RUNTIME]
+    return CommandBackend("phys", argv, {"RRSI_SIM_PHYS_SALT_FILE": _PHYS_SALT_FILE})
+
+
 def carla_backend() -> CommandBackend:
     if shutil.which(CANDACE) is None and not Path(CANDACE).is_file():
         raise InfraError(f"candace CLI not found ({CANDACE}); set RRSI_SIM_CANDACE")
@@ -234,14 +290,21 @@ def get(name: str | None = None) -> Backend:
         return cpu_backend()
     if name == "carla":
         return carla_backend()
-    raise SystemExit(f"unknown RRSI_SIM_BACKEND {name!r}; expected fake, command, cpu or carla")
+    if name == "phys":
+        return phys_backend()
+    if name == "none":
+        return NoneBackend()
+    raise SystemExit(f"unknown RRSI_SIM_BACKEND {name!r}; expected one of {', '.join(BACKENDS)}")
 
 
 def surrogate_name() -> str:
-    """The cheaper backend behind the agent's rollout tool. It differs from the
-    graded backend except on `fake`, which is for tests; on `cpu` the fake
-    bicycle is close to the graded HighwayEnv plant (see README)."""
+    """The backend behind the agent's rollout tool. On `cpu` the fake bicycle
+    is identical to the graded HighwayEnv plant, so the preview reveals the
+    grade; on `phys` it is the nominal kinematic model, not the graded
+    vehicle; `none` switches the preview off (see README)."""
     explicit = os.environ.get("RRSI_SIM_SURROGATE", "").strip().lower()
+    if explicit == "phys":
+        raise SystemExit("the held-out-physics grader cannot serve as the rollout preview")
     if explicit:
         return explicit
     if BACKEND == "carla" and CSF_ROOT and CSF_RUNTIME:
