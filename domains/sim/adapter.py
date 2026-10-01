@@ -48,7 +48,7 @@ from rrsi.domain import Domain          # noqa: E402
 from rrsi.evaluate import TaskResult    # noqa: E402
 import briefs                            # noqa: E402
 import render                            # noqa: E402
-from scenarios import BY_ID, EVOLVE, HELDOUT_IDS, HELDOUT_SEEDS, PRACTICE_SEEDS, brief  # noqa: E402
+from scenarios import BY_ID, EVOLVE, HELDOUT_IDS, brief  # noqa: E402
 
 CFG = json.loads((HERE / "rrsi.json").read_text())
 
@@ -62,7 +62,10 @@ class SimDomain(Domain):
         (r"scenarios\.py|oracles\.py|\bBY_ID\b|\bHELDOUT|\bEVOLVE\b|\bPRACTICE\b|verdict\.json|"
          r"events\.jsonl|manifest\.json|run_tasks|engines\.py|data/",
          "reaches for scenario data, the oracles, the grader or evidence"),
-        (r"straight-\d{3}|\b(?:" + "|".join(str(s) for s in PRACTICE_SEEDS + HELDOUT_SEEDS) + r")\b",
+        # Seeds are ordinary integers (a gain of -300 is not seed 300), so only
+        # the scenario-name form and an explicit seed comparison are flagged;
+        # the LLM critic covers numbers copied from a specific scenario.
+        (r"straight-\d+|\bseed\b\s*(?:==|=|:|in\b)",
          "scenario id or seed hardcoded in the scaffold"),
         (r"urllib|requests\.|socket\.|http://|https://|pip install|subprocess|os\.system",
          "network, package install or process escape from the harness"),

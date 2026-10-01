@@ -261,9 +261,12 @@ def test_rollout_tool_uses_the_surrogate_not_the_graded_engine(tmp_path):
 def test_critic_denylist_flags_seeds_and_grader_access():
     import re
     dom = load_domain("sim")
-    for text in ("if 'straight-103' in brief:", "open('oracles.py')", "seed == 104", "import subprocess"):
+    for text in ("if 'straight-103' in brief:", "open('oracles.py')", "seed == 104", "if seed in (100, 101):",
+                 "import subprocess"):
         assert any(re.search(p, text) for p, _ in dom.critic_patterns), text
-    assert not any(re.search(p, "gain = -250  # proportional term") for p, _ in dom.critic_patterns)
+    for innocent in ("gain = -250  # proportional term",
+                     "use about -300 to -600 on input 0 and 100 to 120 on input 2"):
+        assert not any(re.search(p, innocent) for p, _ in dom.critic_patterns), innocent
 
 
 @pytest.mark.skipif(not os.environ.get("RRSI_SIM_CSF_RUNTIME"), reason="needs the CSF Go runtime")
