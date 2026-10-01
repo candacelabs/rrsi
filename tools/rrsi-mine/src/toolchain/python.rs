@@ -54,6 +54,9 @@ pub fn classify_file(path: &str) -> FileKind {
     let n = super::file_name(path);
     let ext = super::extension(path);
     let py = matches!(ext, "py" | "pyi");
+    if super::is_lockfile(n) {
+        return FileKind::Generated;
+    }
     if !py {
         // Fixtures and data next to the tests travel with the tests.
         return if in_dir_named(path, &TEST_DIRS) { FileKind::Test }
@@ -323,6 +326,7 @@ mod tests {
         assert_eq!(classify_file("docs/diagram.svg"), FileKind::Other);
         assert_eq!(classify_file(".github/workflows/ci.yml"), FileKind::Source, "a checked workflow is the fix");
         assert_eq!(classify_file("scripts/release.sh"), FileKind::Source);
+        assert_eq!(classify_file("uv.lock"), FileKind::Generated, "machine-written");
         assert!(is_test_module("a/test_x.py") && is_test_module("a/x_test.py"));
         assert!(!is_test_module("tests/helpers.py") && !is_test_module("conftest.py"));
     }

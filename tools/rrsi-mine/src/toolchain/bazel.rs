@@ -62,7 +62,10 @@ pub fn classify_file(path: &str) -> FileKind {
     if BUILD_FILES.contains(&n) {
         return FileKind::Test;
     }
-    if matches!(n, "MODULE.bazel" | "MODULE.bazel.lock" | "WORKSPACE" | "WORKSPACE.bazel") || ext == "bzl" {
+    if super::is_lockfile(n) {
+        return FileKind::Generated;
+    }
+    if matches!(n, "MODULE.bazel" | "WORKSPACE" | "WORKSPACE.bazel") || ext == "bzl" {
         return FileKind::Source;
     }
     if GENERATED.iter().any(|g| path.contains(g)) || n.ends_with("_pb2.py") || n.contains(".pb.") {
@@ -318,6 +321,8 @@ mod tests {
         assert_eq!(classify_file("pkg/cron/cron.go"), FileKind::Source);
         assert_eq!(classify_file("tools/x/runner.ml"), FileKind::Source);
         assert_eq!(classify_file("MODULE.bazel"), FileKind::Source);
+        assert_eq!(classify_file("MODULE.bazel.lock"), FileKind::Generated, "machine-written");
+        assert_eq!(classify_file("go.sum"), FileKind::Generated);
         assert_eq!(classify_file("bazel/defs.bzl"), FileKind::Source);
         assert_eq!(classify_file("pkg/api.pb.go"), FileKind::Generated);
         assert_eq!(classify_file("pkg/README.md"), FileKind::Other);

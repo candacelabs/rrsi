@@ -201,6 +201,12 @@ pub fn extension(path: &str) -> &str {
     name.rsplit_once('.').map(|(_, e)| e).unwrap_or("")
 }
 
+/// Machine-written dependency locks: never part of a fix's size.
+pub fn is_lockfile(name: &str) -> bool {
+    matches!(name, "MODULE.bazel.lock" | "go.sum" | "uv.lock" | "poetry.lock" | "Cargo.lock"
+                   | "package-lock.json" | "pnpm-lock.yaml" | "yarn.lock")
+}
+
 /// One commit's changed files, split by kind, with the files tracked at it.
 pub struct Changed {
     pub sha: String,
@@ -220,7 +226,8 @@ pub trait Mapper {
 }
 
 /// The candidates of a non-Go toolchain: commits since `since` that change
-/// source and tests of one project root, within the Go miner's size limits
+/// source and tests of one project root (source elsewhere in the repository
+/// is not part of the fix), within the Go miner's size limits
 /// (at most MAX_SRC_CHURN changed source lines in at most MAX_SRC_PACKAGES
 /// directories), whose changed tests map to at least one test unit.
 pub fn scan_candidates(tc: &dyn Toolchain, mapper: &dyn Mapper, repo: &Path, since: &str)
@@ -247,10 +254,14 @@ pub fn scan_candidates(tc: &dyn Toolchain, mapper: &dyn Mapper, repo: &Path, sin
             continue;
         }
         let tracked: BTreeSet<String> = tracked_files(repo, sha)?.into_iter().collect();
-        let ch = Changed { sha: sha.to_string(), src, tests, tracked };
+        let mut ch = Changed { sha: sha.to_string(), src, tests, tracked };
         let Some(root) = mapper.root(&ch) else { continue };
-        // Every changed source file must belong to the same project.
-        if ch.src.iter().any(|(_, f)| !under(&root, f)) || ch.tests.iter().any(|f| !under(&root, f)) {
+        // The task is the project's own change: like the Go miner ignoring
+        // non-Go files, files of other projects are neither fix nor tests
+        // (they stay in the commit tree only).
+        ch.src.retain(|(_, f)| under(&root, f));
+        ch.tests.retain(|f| under(&root, f));
+        if ch.src.is_empty() {
             continue;
         }
         let churn: u64 = ch.src.iter().map(|(c, _)| c).sum();
@@ -278,9 +289,10 @@ pub fn scan_candidates(tc: &dyn Toolchain, mapper: &dyn Mapper, repo: &Path, sin
     Ok(out)
 }
 
-/// The single nearest-root of `files` (nearest ancestor holding a marker in
-/// `tracked`), if they all share one; `topmost` takes the outermost marker
-/// instead (CMake: the top-level project owns the CTest tree).
+/// The single project root of `files` (nearest ancestor holding a marker in
+/// `tracked`), when every file that has a root has the same one (files in
+/// no project are ignored); `topmost` takes the outermost marker instead
+/// (CMake: the top-level project owns the CTest tree).
 pub fn single_root(files: &[String], tracked: &BTreeSet<String>, is_marker: impl Fn(&str) -> bool,
                    topmost: bool) -> Option<String> {
     let markers: BTreeSet<String> = tracked.iter().filter(|f| is_marker(f)).map(|f| dir_of(f)).collect();
@@ -290,7 +302,7 @@ pub fn single_root(files: &[String], tracked: &BTreeSet<String>, is_marker: impl
             a.reverse();
         }
         a.into_iter().find(|d| markers.contains(d))
-    }).collect();
+    }).filter(Option::is_some).collect();
     match roots.into_iter().collect::<Vec<_>>().as_slice() {
         [Some(r)] => Some(r.clone()),
         _ => None,
@@ -446,8 +458,10 @@ mod tests {
         let py = |f: &str| file_name(f) == "pyproject.toml";
         assert_eq!(single_root(&["tools/p/t/test_a.py".into()], &tracked, py, false).as_deref(), Some("tools/p"));
         assert_eq!(single_root(&["other/test_a.py".into()], &tracked, py, false), None, "no marker");
-        assert_eq!(single_root(&["tools/p/a.py".into(), "other/b.py".into()], &tracked, py, false), None,
-                   "two roots");
+        assert_eq!(single_root(&["tools/p/a.py".into(), "other/b.py".into()], &tracked, py, false).as_deref(),
+                   Some("tools/p"), "a file in no project is ignored");
+        let two: BTreeSet<String> = ["a/pyproject.toml", "b/pyproject.toml"].map(String::from).into_iter().collect();
+        assert_eq!(single_root(&["a/t.py".into(), "b/t.py".into()], &two, py, false), None, "two roots");
     }
 
     #[test]
