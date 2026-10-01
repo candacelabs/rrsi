@@ -61,7 +61,7 @@ def parse_json(text: str) -> dict:
         except json.JSONDecodeError:
             continue
     if out is None:
-        raise LLMError(f"reply is not JSON: {text[:200]!r}")
+        raise LLMError(f"reply is not JSON ({len(text)} chars): {text[:200]!r}", text)
     if not isinstance(out, dict):
         raise LLMError("reply is not a JSON object")
     return out

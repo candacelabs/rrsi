@@ -468,7 +468,10 @@ def mine(out: Path = DEFAULT_OUT, root: Path | None = None, since: str = "", bac
                                          ensure_private(o / "llm-cwd"), effort)
                 except LLMAuthError:
                     raise
-                except LLMError:
+                except LLMError as e:
+                    if len(e.args) > 1:  # keep the raw reply, privately, for debugging
+                        (o / "llm-failures").mkdir(exist_ok=True)
+                        (o / "llm-failures" / f"{time.time_ns()}.txt").write_text(str(e.args[1]))
                     if attempt == RETRIES:
                         raise
     t0 = time.time()
