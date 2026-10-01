@@ -15,7 +15,7 @@
 //! Mine agent *struggles* from Claude Code session transcripts.
 //!
 //! ```text
-//! rrsi-mine traces --root ~/.claude/projects --out DIR [--since 2026-09-01] [--jobs 8]
+//! rrsi-mine traces --out DIR [--root ~/.claude/projects] [--since 2026-09-01] [--jobs 8] [--exclude S]
 //! ```
 //!
 //! Every `<project>/<session>.jsonl` (and nested subagent transcript) is
@@ -835,6 +835,55 @@ pub fn since_epoch(since: &str) -> Option<u64> {
 
 pub fn root_default() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".claude/projects")
+}
+
+// ------------------------------------------------------------- plugin
+
+/// The traces miner as a plugin: `rrsi-mine traces --out DIR [--root R]
+/// [--since DATE] [--jobs N] [--exclude S]...`.
+pub struct Traces;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Args {
+    out: PathBuf,
+    #[serde(default)]
+    root: Option<PathBuf>,
+    #[serde(default)]
+    since: String,
+    #[serde(default = "default_jobs")]
+    jobs: usize,
+    #[serde(default, deserialize_with = "crate::miner::one_or_many")]
+    exclude: Vec<String>,
+}
+
+fn default_jobs() -> usize {
+    8
+}
+
+impl crate::miner::Miner for Traces {
+    fn name(&self) -> &'static str {
+        "traces"
+    }
+    fn about(&self) -> &'static str {
+        "Struggle episodes from Claude Code session transcripts (nine named detectors, no LLM)"
+    }
+    fn inputs(&self) -> &'static [(&'static str, &'static str)] {
+        &[("out", "output directory (outside every work tree)"),
+          ("root", "transcript root, default ~/.claude/projects"),
+          ("since", "only episodes on/after this ISO date"), ("jobs", "parser threads, default 8"),
+          ("exclude", "skip transcripts whose path contains this (repeatable)")]
+    }
+    fn records(&self) -> &'static [(&'static str, &'static str)] {
+        &[("episodes.jsonl", "one struggle episode: session, signals, bounded context, counts"),
+          ("traces-summary.json", "counts per signal, sessions, projects"),
+          ("traces-state.json", "per transcript mtime/size/hash for incremental runs")]
+    }
+    fn run(&self, args: Value) -> Result<Value> {
+        let a: Args = crate::miner::parse_args(self.name(), args)?;
+        let root = a.root.unwrap_or_else(root_default);
+        Ok(serde_json::to_value(mine_traces(&root, &a.out, &a.since, a.jobs, &a.exclude)?)?)
+    }
 }
 
 #[cfg(test)]

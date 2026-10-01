@@ -68,7 +68,7 @@
 > | `toy` domain | 30 small Python tasks with hidden tests, a deliberately weak harness, a network-less container sandbox — the cheapest full RRSI loop | [`domains/toy/`](domains/toy/README.md) |
 > | `rrsi-mine` | Rust: mine commits → validate FAIL_TO_PASS in sealed `golang` containers → fairness stages → `exam.jsonl`; pyo3 bindings (`import rrsi_mine`) for the Python side | [`tools/rrsi-mine/`](tools/rrsi-mine) |
 > | `rrsi-report` | Rust: one self-contained HTML report — plain-language "start here", funnel, why tasks were dropped, timeline, practice-set vs final-exam split with health checks and interpretation, task browser with example cards (the reference fix stays a collapsed spoiler) | [`tools/rrsi-mine/src/bin/rrsi-report.rs`](tools/rrsi-mine/src/bin/rrsi-report.rs) |
-> | Harness miner | Rust `rrsi-mine traces` finds where the agent struggled in Claude Code session transcripts; `python -m rrsi harness mine` clusters recurring struggles into harness tasks and a private report | [`tools/rrsi-mine/src/traces.rs`](tools/rrsi-mine/src/traces.rs), [`rrsi/harness/`](rrsi/harness/mine.py) |
+> | Harness miner | Rust `rrsi-mine traces` (a plugin of the miner registry, `rrsi-mine miners`) finds where the agent struggled in Claude Code session transcripts; `python -m rrsi harness mine` clusters recurring struggles into harness tasks and a private report | [`tools/rrsi-mine/src/miners/traces.rs`](tools/rrsi-mine/src/miners/traces.rs), [`rrsi/harness/`](rrsi/harness/mine.py) |
 >
 > **How it works, in one example.** A commit "suppress unsafe notification
 > retries" added a test: *a delivery error that says it is not retryable must be
@@ -148,6 +148,61 @@
 > never become transcripts it mines. This repository holds only the code and
 > synthetic test fixtures: no transcript text, episode or finding is ever
 > committed here.
+>
+> **Miners are plugins; write your own.** `rrsi-mine` runs any registered
+> miner: `rrsi-mine miners` lists them (name, inputs, the records each
+> writes) and `rrsi-mine <name> --key value ...` runs one. Two ship today:
+> `git-history` (the FAIL_TO_PASS task miner above) and `traces` (the
+> struggle miner). A miner is one file in
+> [`tools/rrsi-mine/src/miners/`](tools/rrsi-mine/src/miners/mod.rs)
+> implementing the [`Miner`](tools/rrsi-mine/src/miner.rs) trait plus one
+> registration line; deleting both removes it. Arguments arrive as a plain
+> JSON object (the CLI turns `--key value` into `{"key": value}`) and the
+> summary goes back as JSON, so any front end can drive a miner without
+> linking against it. The privacy rule is enforced for every miner before
+> it runs: an `out` inside a git work tree is refused.
+>
+> ```rust
+> // tools/rrsi-mine/src/miners/todo_comments.rs
+> use crate::miner::{parse_args, Miner};
+> use serde_json::{json, Value};
+>
+> pub struct TodoComments;
+>
+> #[derive(serde::Deserialize)]
+> #[serde(deny_unknown_fields)]
+> struct Args { repo: std::path::PathBuf, out: std::path::PathBuf }
+>
+> impl Miner for TodoComments {
+>     fn name(&self) -> &'static str { "todo-comments" }
+>     fn about(&self) -> &'static str { "one record per TODO comment in a repository" }
+>     fn inputs(&self) -> &'static [(&'static str, &'static str)] {
+>         &[("repo", "the repository"), ("out", "output directory")]
+>     }
+>     fn records(&self) -> &'static [(&'static str, &'static str)] {
+>         &[("todos.jsonl", "one TODO: file, line, text")]
+>     }
+>     fn run(&self, args: Value) -> anyhow::Result<Value> {
+>         let a: Args = parse_args(self.name(), args)?;
+>         let grep = crate::git(&a.repo, &["grep", "-n", "TODO"]).unwrap_or_default();
+>         std::fs::create_dir_all(&a.out)?;
+>         let mut n = 0;
+>         let mut text = String::new();
+>         for line in grep.lines() {
+>             let mut p = line.splitn(3, ':');
+>             let (file, no, body) = (p.next(), p.next(), p.next());
+>             text += &json!({"file": file, "line": no, "text": body}).to_string();
+>             text.push('\n');
+>             n += 1;
+>         }
+>         std::fs::write(a.out.join("todos.jsonl"), text)?;
+>         Ok(json!({"todos": n}))
+>     }
+> }
+> ```
+>
+> Then add `todo_comments => TodoComments,` to the `register!` list in
+> `src/miners/mod.rs` and run `rrsi-mine todo-comments --repo PATH --out DIR`.
 
 Check out our [paper](https://arxiv.org/abs/2609.24972) and [project page](https://regularized-rsi.com/) for more details.
 

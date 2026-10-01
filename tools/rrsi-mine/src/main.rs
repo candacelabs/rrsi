@@ -18,12 +18,12 @@ use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use rrsi_mine::fairness::{self as fair, Task};
 use rrsi_mine::llm::{Copilot, ProcessRunner};
-use rrsi_mine::{candidates, mine, Docker};
+use rrsi_mine::{candidates, miner, mine, Docker};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[derive(Parser)]
-#[command(version, about = "Mine FAIL_TO_PASS-validated Go tasks from git history, and agent struggles from session transcripts")]
+#[command(version, about = "Mine FAIL_TO_PASS-validated Go tasks from git history; run any registered miner (`rrsi-mine miners`)")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -101,23 +101,11 @@ enum Cmd {
         #[command(flatten)]
         stage: StageArgs,
     },
-    /// Mine struggle episodes from Claude Code transcripts (no LLM; see traces.rs).
-    Traces {
-        /// The transcript root (one directory per project).
-        #[arg(long)]
-        root: Option<PathBuf>,
-        /// Output directory; must be outside every git work tree.
-        #[arg(long)]
-        out: PathBuf,
-        /// Only episodes starting on or after this ISO date.
-        #[arg(long, default_value = "")]
-        since: String,
-        #[arg(long, default_value_t = 8)]
-        jobs: usize,
-        /// Skip transcripts whose path contains this (repeatable).
-        #[arg(long)]
-        exclude: Vec<String>,
-    },
+    /// List the registered miners (name, inputs, records) as JSON.
+    Miners,
+    /// Any registered miner: `rrsi-mine <name> --key value ...` (see `miners`).
+    #[command(external_subcommand)]
+    Miner(Vec<String>),
     /// Fairness stages 1-6 in order.
     Fairness {
         #[command(flatten)]
@@ -241,10 +229,14 @@ fn main() -> Result<()> {
             fair::run_stage("specificity", &load(&stage)?, stage.jobs, stage.force,
                             |t| fair::specificity(repo.as_deref(), t))?;
         }
-        Cmd::Traces { root, out, since, jobs, exclude } => {
-            let root = root.unwrap_or_else(rrsi_mine::traces::root_default);
-            let sum = rrsi_mine::traces::mine_traces(&root, &out, &since, jobs, &exclude)?;
-            println!("{}", serde_json::to_string_pretty(&sum)?);
+        Cmd::Miners => {
+            let all: Vec<_> = rrsi_mine::miners::registry().iter().map(|m| miner::describe(*m)).collect();
+            println!("{}", serde_json::to_string_pretty(&all)?);
+        }
+        Cmd::Miner(argv) => {
+            let (name, rest) = argv.split_first().context("miner name")?;
+            let summary = miner::run(name, miner::args_from_cli(rest)?)?;
+            println!("{}", serde_json::to_string_pretty(&summary)?);
         }
         Cmd::Gate { stage } => gate(&stage, &load(&stage)?)?,
         Cmd::Fairness { stage, repo, runs, go, llm } => {
