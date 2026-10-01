@@ -171,6 +171,27 @@
 > tools/rrsi-mine/target/release/rrsi-mine handoffs --out DIR   # deterministic stage only
 > ```
 >
+> **PR gap: do actively working agents have a PR?** A third transcript
+> miner, `pr-gap`, measures each agent run (a main session or one subagent):
+> the time from its first `git commit` to its first `git push`, how many
+> commits sat unpushed, the time from the first push to `gh pr create`, and
+> whether the run ended with commits but no PR (the gap). Commit messages and
+> heredocs are not mistaken for commands. It also flags briefs (`Agent`
+> prompts, or brief files a subagent reads) that defer the PR ("don't open a
+> separate PR", "when complete, open...") and later operator corrections, and
+> splits subagent gap rates by brief class (defers / asks for an early draft
+> PR / silent). With `--github` it joins pushed branches against
+> `gh pr list --head` to confirm each gap and to find branches that already
+> had a PR. It scores the rule family "when an agent's first commit is N
+> minutes old with no push, or its pushed branch has had no PR for N minutes,
+> open a draft PR for it and tell the agent" on the measured runs and writes
+> the best one as a harness task.
+>
+> ```bash
+> python -m rrsi harness mine --miner pr-gap   # -> ~/rrsi-private/harness/pr-gap (joins GitHub)
+> tools/rrsi-mine/target/release/rrsi-mine pr-gap --out DIR [--github]   # deterministic stage only
+> ```
+>
 > **Privacy rules.** Transcripts hold private source, hostnames, addresses and
 > personal text. Both stages refuse to write inside any git work tree; keep
 > the output (default `~/rrsi-private/harness`) out of every repository. Text
@@ -183,9 +204,10 @@
 >
 > **Miners are plugins; write your own.** `rrsi-mine` runs any registered
 > miner: `rrsi-mine miners` lists them (name, inputs, the records each
-> writes) and `rrsi-mine <name> --key value ...` runs one. Three ship today:
-> `git-history` (the FAIL_TO_PASS task miner above), `traces` (the
-> struggle miner) and `handoffs` (cross-session coordination). A miner is one file in
+> writes) and `rrsi-mine <name> --key value ...` runs one. Five ship today:
+> `git-history` (the FAIL_TO_PASS task miner above), `slices` (FAIL_TO_PASS
+> tasks from merged slice PRs), `traces` (the struggle miner), `handoffs`
+> (cross-session coordination) and `pr-gap` (active agents without a PR). A miner is one file in
 > [`tools/rrsi-mine/src/miners/`](tools/rrsi-mine/src/miners/mod.rs)
 > implementing the [`Miner`](tools/rrsi-mine/src/miner.rs) trait plus one
 > registration line; deleting both removes it. Arguments arrive as a plain
