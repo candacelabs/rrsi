@@ -40,6 +40,16 @@ class LLMError(RuntimeError):
     """The backend failed or returned no parseable JSON."""
 
 
+class LLMAuthError(LLMError):
+    """The backend is not logged in; every further call would fail the same way."""
+
+
+def _raise(msg: str) -> None:
+    if "authenticat" in msg.lower() or "not logged in" in msg.lower():
+        raise LLMAuthError(f"{msg} (log the CLI in, or pick another --backend)")
+    raise LLMError(msg)
+
+
 def parse_json(text: str) -> dict:
     """The first JSON object in `text` (fenced or bare)."""
     m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.S)
@@ -70,7 +80,7 @@ def _sdk(model: str, system: str, prompt: str, schema: dict, cwd: Path, effort: 
         if result is None:
             raise LLMError("no result message")
         if result.is_error:
-            raise LLMError(f"sdk error: {result.result}")
+            _raise(f"sdk error: {result.result}")
         if isinstance(result.structured_output, dict):
             return result.structured_output
         return parse_json(result.result or "")
@@ -80,7 +90,7 @@ def _sdk(model: str, system: str, prompt: str, schema: dict, cwd: Path, effort: 
     except LLMError:
         raise
     except Exception as e:  # the SDK raises its own process/result errors
-        raise LLMError(f"sdk: {e}") from e
+        _raise(f"sdk: {e}")
 
 
 def complete_json(backend: str, model: str | None, system: str, prompt: str, schema: dict,
@@ -96,4 +106,4 @@ def complete_json(backend: str, model: str | None, system: str, prompt: str, sch
     try:
         return parse_json(cli_llm.complete(backend, model, system, ask))
     except cli_llm.CLIError as e:
-        raise LLMError(str(e)) from e
+        _raise(str(e))

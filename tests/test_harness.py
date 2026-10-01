@@ -131,6 +131,15 @@ class HarnessMinerTest(unittest.TestCase):
         self.run_mine(fake)
         self.assertEqual(fake.calls["label"], 1)
 
+    def test_an_auth_failure_stops_the_run(self):
+        from rrsi.harness.llm import LLMAuthError
+
+        def logged_out(system, prompt, schema, out):
+            raise LLMAuthError("Failed to authenticate")
+
+        with self.assertRaises(LLMAuthError):
+            M.mine(out=self.out, skip_traces=True, complete=logged_out, batch=6, jobs=2, log=lambda _: None)
+
     def test_prompts_are_redacted(self):
         eps = [episode(0, "s", "p", {"tool_error": 1},
                        text="ssh user@example.invalid at 100.64.1.2 token=abc123 in /home/someone/x " + "a" * 40)]

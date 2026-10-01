@@ -44,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable
 
-from rrsi.harness.llm import LLMError, complete_json
+from rrsi.harness.llm import LLMAuthError, LLMError, complete_json
 
 ROOT = Path(__file__).resolve().parents[2]
 CRATE = ROOT / "tools" / "rrsi-mine"
@@ -205,6 +205,9 @@ def label(out: Path, episodes: list[dict], complete: Complete, batch: int, jobs:
             try:
                 recs = fut.result()
             except (LLMError, KeyError, TypeError) as e:
+                if isinstance(e, LLMAuthError):
+                    pool.shutdown(wait=False, cancel_futures=True)
+                    raise
                 failed += 1
                 log(f"[label] batch {futs[fut]} failed: {str(e)[:200]}")
                 continue
@@ -365,6 +368,9 @@ def make_tasks(out: Path, groups: list[dict], labels: dict[str, dict], complete:
             try:
                 tasks.append(fut.result())
             except (LLMError, KeyError, TypeError) as e:
+                if isinstance(e, LLMAuthError):
+                    pool.shutdown(wait=False, cancel_futures=True)
+                    raise
                 failed += 1
                 log(f"[tasks] {futs[fut]} failed: {str(e)[:200]}")
     keys = {t["id"] for t in tasks}
