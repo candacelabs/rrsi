@@ -139,6 +139,28 @@
 > `DIR/exam_candidates.jsonl`, `DIR/REPORT.md` (the top recurring struggles
 > with episode, session and project counts and the proposed fix).
 >
+> **Handoffs: when should agents have talked to each other?** A second
+> transcript miner, `handoffs`, looks at several concurrent sessions at once.
+> In one transcript it finds the operator relaying between sessions ("tell the
+> other session..."), messages that arrived from other sessions or a
+> coordinator (scored: did the receiver act, did it reply?), retractions and
+> rename churn in those messages, outgoing message calls, merge/rebase
+> conflicts, writes refused because a file belongs to another worktree,
+> "already done by..." discoveries, waiting on another session's work,
+> re-running a status check instead of asking, ownership questions and
+> claim/release comments. Across transcripts it finds two sessions editing
+> the same repository file (worktrees folded together) or branch at the same
+> time, and near-identical issue or PR titles from two sessions.
+> `python -m rrsi harness mine --miner handoffs` turns the recurring patterns
+> into tasks of the same shape, each with a trigger rule: "when
+> <detectable condition>, message <owner, and how the owner is resolved> with
+> <payload>", ready to become a harness rule or an ownership-state hook.
+>
+> ```bash
+> python -m rrsi harness mine --miner handoffs   # -> ~/rrsi-private/harness/handoffs
+> tools/rrsi-mine/target/release/rrsi-mine handoffs --out DIR   # deterministic stage only
+> ```
+>
 > **Privacy rules.** Transcripts hold private source, hostnames, addresses and
 > personal text. Both stages refuse to write inside any git work tree; keep
 > the output (default `~/rrsi-private/harness`) out of every repository. Text
@@ -151,9 +173,9 @@
 >
 > **Miners are plugins; write your own.** `rrsi-mine` runs any registered
 > miner: `rrsi-mine miners` lists them (name, inputs, the records each
-> writes) and `rrsi-mine <name> --key value ...` runs one. Two ship today:
-> `git-history` (the FAIL_TO_PASS task miner above) and `traces` (the
-> struggle miner). A miner is one file in
+> writes) and `rrsi-mine <name> --key value ...` runs one. Three ship today:
+> `git-history` (the FAIL_TO_PASS task miner above), `traces` (the
+> struggle miner) and `handoffs` (cross-session coordination). A miner is one file in
 > [`tools/rrsi-mine/src/miners/`](tools/rrsi-mine/src/miners/mod.rs)
 > implementing the [`Miner`](tools/rrsi-mine/src/miner.rs) trait plus one
 > registration line; deleting both removes it. Arguments arrive as a plain
