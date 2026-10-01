@@ -19,12 +19,20 @@ domains/sim/README.md.)
 It exists so the domain's plumbing (propose -> check -> execute -> grade) runs
 in CI with no Go runtime, no HighwayEnv and no GPU. It mirrors CSF's numeric
 profile v1 contract: the controller check follows csf/compiler.go's
-admission rules, evaluation uses the same bounded integer arithmetic (SCALE
-truncates toward zero), and the plant is a kinematic bicycle like HighwayEnv's.
+admission rules (a JSON null means the field's default, as in ProtoJSON),
+evaluation uses the same bounded integer arithmetic (SCALE truncates toward
+zero), and the plant is HighwayEnv's kinematic bicycle, line for line. That
+bicycle is the only model the agent's rollout preview uses.
+
 It writes the same files a CSF scenario_worker batch writes (batch.json and,
 per episode, events.jsonl / trace.jsonl / manifest.json). It is not evidence
 about any real simulator; `tests/test_sim_domain.py` compares its controller
 semantics with the Go runtime whenever RRSI_SIM_CSF_RUNTIME is set.
+
+`run_episode` takes a plant factory and a controller stepper so a grader-side
+backend can reuse the episode loop and evidence format with a different
+vehicle and with the Go runtime evaluating the controller; the defaults are
+the kinematic bicycle and the in-process mirror.
 """
 
 from __future__ import annotations
@@ -100,8 +108,21 @@ def _compile(expression, depth: int, budget: list) -> None:
     budget[0] += 1
 
 
+def normalize(value):
+    """A copy without the object keys whose value is null (lists are kept).
+
+    ProtoJSON reads a null field as its default, so the Go runtime admits
+    {"value": null}; the mirror must read it the same way."""
+    if isinstance(value, dict):
+        return {k: normalize(v) for k, v in value.items() if v is not None}
+    if isinstance(value, list):
+        return [normalize(v) for v in value]
+    return value
+
+
 def check(controller) -> None:
     """Raise Rejected unless CSF would admit this Controller JSON."""
+    controller = normalize(controller)
     if not isinstance(controller, dict):
         raise Rejected("controller must be a JSON object")
     unknown = set(controller) - CONTROLLER_FIELDS
@@ -133,7 +154,7 @@ def _evaluate(expression: dict, features: list[int]) -> int:
     elif opcode == "OPCODE_ADD":
         result = arguments[0] + arguments[1]
     elif opcode == "OPCODE_SCALE":
-        product = arguments[0] * int(expression["value"])
+        product = arguments[0] * int(expression.get("value", 0))
         result = int(math.copysign(abs(product) // SCALE, product)) if product else 0
     else:
         result = _clamp(arguments[0], int(expression.get("lower", 0)), int(expression.get("upper", 0)))
@@ -141,6 +162,7 @@ def _evaluate(expression: dict, features: list[int]) -> int:
 
 
 def act(controller: dict, features: list[int]) -> tuple[int, int]:
+    """The action of an admitted, normalized controller."""
     return (_clamp(_evaluate(controller["steering"], features), -SCALE, SCALE),
             _clamp(_evaluate(controller["acceleration"], features), -SCALE, SCALE))
 
@@ -172,31 +194,49 @@ class Bicycle:
         return {"longitudinal_metres": self.x, "lateral_metres": self.y,
                 "heading_error_radians": error, "speed_mps": self.speed, "collisions": 0}
 
+    def observe(self) -> dict:
+        """What the controller sees: the exact state."""
+        return self.state()
+
+
+def mirror_stepper(controller: dict):
+    """features -> (steering, acceleration) by the in-process mirror; raises
+    Rejected for a controller CSF would not admit."""
+    check(controller)
+    return lambda features: act(controller, features)
+
 
 def _event(run_id: str, **payload) -> str:
     stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     return json.dumps({"schema_version": 1, "recorded_at": stamp, **payload}, sort_keys=True)
 
 
-def run_episode(job: dict, output: Path, run_id: str) -> dict:
+def run_episode(job: dict, output: Path, run_id: str, plant_factory=None, stepper_factory=None,
+                simulator: dict | None = None) -> dict:
+    """One episode into `output`. plant_factory(scenario) builds the vehicle
+    (default: the kinematic Bicycle); stepper_factory(controller) returns
+    features -> (steering, acceleration) or raises Rejected (default: the
+    mirror); `simulator` is what the manifest records (default: describe())."""
     scenario, goal = job["scenario"], float(job["goal_metres"])
+    controller = normalize(job.get("controller"))
     output.mkdir(parents=True, exist_ok=False)
     summary = {"id": job["id"], "status": "rejected", "steps_completed": 0,
                "simulation_seconds": 0.0, "termination": "", "reason": ""}
     events = [_event(run_id, definition={"name": name}) for name in METRICS]
     trace = []
     try:
-        check(job.get("controller"))
+        step = (stepper_factory or mirror_stepper)(controller)
     except Rejected as error:
         summary["reason"] = f"controller rejected: {error}"
     else:
-        plant, dt, half = Bicycle(scenario), scenario["tick_milliseconds"] / 1000, scenario["lane_half_width_metres"]
+        plant = (plant_factory or Bicycle)(scenario)
+        dt, half = scenario["tick_milliseconds"] / 1000, scenario["lane_half_width_metres"]
         target, fallbacks, termination = scenario["target_speed_mps"], 0, "step_budget"
         for tick in range(int(scenario["steps"])):
-            s = plant.state()
+            s = plant.observe()
             features = [fixed_point(s["lateral_metres"] / half), fixed_point(s["heading_error_radians"] / 0.5),
                         fixed_point((target - s["speed_mps"]) / 10), 0]
-            steering, acceleration = act(job["controller"], features)
+            steering, acceleration = step(features)
             plant.step(steering / 1000 * 0.5, acceleration / 1000 * 3, dt)
             after, completed = plant.state(), tick + 1
             trace.append(json.dumps({"step": completed, "simulation_seconds": completed * dt,
@@ -227,7 +267,7 @@ def run_episode(job: dict, output: Path, run_id: str) -> dict:
     (output / "trace.jsonl").write_text("\n".join(trace) + ("\n" if trace else ""))
     (output / "manifest.json").write_text(json.dumps({
         "format": "csf-scenario-episode-v1", "status": summary["status"], "run_id": run_id,
-        "episode": job["id"], "simulator": describe(), "scenario": scenario, "goal_metres": goal,
+        "episode": job["id"], "simulator": simulator or describe(), "scenario": scenario, "goal_metres": goal,
         "controller": job.get("controller"), "steps_completed": summary["steps_completed"],
         "simulation_seconds": summary["simulation_seconds"], "termination": summary["termination"],
         "reason": summary["reason"], "numeric_profile": 1}, indent=1, sort_keys=True))

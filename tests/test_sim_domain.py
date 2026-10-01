@@ -20,6 +20,7 @@ CSF Go runtime, the fake controller semantics are also compared with it.
 """
 
 import json
+import math
 import os
 import random
 import subprocess
@@ -122,6 +123,48 @@ def test_scale_truncates_toward_zero_like_the_go_runtime():
     c = {"schema_version": 1, "name": "s", "steering": scale(0, 1), "acceleration": scale(0, -1)}
     assert fake_backend.act(c, [1999, 0, 0, 0]) == (1, -1)
     assert fake_backend.act(c, [-1999, 0, 0, 0]) == (-1, 1)
+
+
+def test_a_null_field_reads_as_its_default_like_protojson(tmp_path):
+    # The Go runtime admits {"value": null}; the mirror once rejected it.
+    nulled = controller()
+    nulled["steering"]["value"] = None
+    nulled["acceleration"]["arguments"][0]["value"] = None
+    fake_backend.check(nulled)
+    assert fake_backend.normalize(nulled)["steering"] == controller()["steering"]
+    zero_gain = controller(speed=0)
+    for features in ([500, -300, 200, 0], [-1999, 40, -700, 0]):
+        assert fake_backend.act(fake_backend.normalize(nulled), features) == fake_backend.act(zero_gain, features)
+    task = scenarios.PRACTICE[0]
+    job = {"id": "n", "scenario": task["scenario"], "goal_metres": task["goal_metres"], "controller": nulled}
+    assert fake_backend.run_episode(job, tmp_path / "n", "r")["status"] == "completed"
+    manifest = json.loads((tmp_path / "n" / "manifest.json").read_text())
+    assert manifest["controller"] == nulled, "the manifest keeps the submitted controller"
+
+
+def test_the_preview_plant_is_highway_envs_kinematic_bicycle(tmp_path):
+    """The fake (preview) plant equals an inline copy of HighwayEnv's
+    kinematic Vehicle.step: 5 m length, slip angle beta, one Euler step."""
+    template = controller(-300, -600, 800)
+    for task in scenarios.PRACTICE[:3]:
+        job = {"id": task["id"], "scenario": task["scenario"], "goal_metres": task["goal_metres"],
+               "controller": template}
+        fake_backend.run_episode(job, tmp_path / task["id"], "r")
+        rows = [json.loads(line) for line in (tmp_path / task["id"] / "trace.jsonl").read_text().splitlines()]
+        s = task["scenario"]
+        x, y, heading = 0.0, s["initial_lateral_metres"], s["initial_heading_radians"]
+        speed, dt = 0.6 * s["target_speed_mps"], s["tick_milliseconds"] / 1000
+        for row in rows:
+            delta = row["action"]["steering"] / 1000 * 0.5
+            beta = math.atan(0.5 * math.tan(delta))
+            x += speed * math.cos(heading + beta) * dt
+            y += speed * math.sin(heading + beta) * dt
+            heading += speed * math.sin(beta) / (5.0 / 2) * dt
+            speed += row["action"]["acceleration"] / 1000 * 3 * dt
+            state = row["state"]
+            assert abs(state["longitudinal_metres"] - x) < 1e-12 and abs(state["lateral_metres"] - y) < 1e-12
+            assert abs(state["heading_error_radians"] - heading) < 1e-12 and abs(state["speed_mps"] - speed) < 1e-12
+        assert len(rows) > 50
 
 
 def grade_one(c, task=None, tmp=None):
@@ -284,6 +327,9 @@ def test_fake_semantics_match_the_csf_go_runtime():
         action = json.loads(out.stdout)["action"]
         assert (int(action.get("steering", 0)), int(action.get("acceleration", 0))) == fake_backend.act(c, features)
     assert backends._go_compile({"schema_version": 1, "name": "r"})[0] is False
+    nulled = controller()
+    nulled["steering"]["value"] = None
+    assert backends._go_compile(nulled)[0] is True, "ProtoJSON reads null as the default"
 
 
 def test_any_command_honouring_the_contract_is_an_backend(tmp_path):
