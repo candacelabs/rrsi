@@ -16,7 +16,9 @@
     python -m rrsi harness mine [--out ~/rrsi-private/harness] [--since DATE]
                                 [--backend sdk|copilot|codex] [--model M]
 
-Stage 1 (deterministic, Rust): `rrsi-mine traces` writes OUT/episodes.jsonl.
+Stage 1 (deterministic, Rust): a registered miner (`--miner traces`, the
+default, or `--miner handoffs`) writes OUT/episodes.jsonl; handoff tasks also
+carry a trigger rule ("when <condition>, message <owner> with <payload>").
 Stage 2 (LLM):
   label    batches of redacted episode digests -> one recurring-struggle
            pattern slug per episode (OUT/labels.jsonl; labelled episodes are
@@ -86,8 +88,9 @@ def rust_binary(build: bool = True) -> Path:
     return exe
 
 
-def run_traces(out: Path, root: Path | None, since: str, jobs: int, exclude: list[str]) -> dict:
-    cmd = [str(rust_binary()), "traces", "--out", str(out), "--jobs", str(jobs), "--since", since]
+def run_miner(miner: str, out: Path, root: Path | None, since: str, jobs: int, exclude: list[str]) -> dict:
+    """Runs a registered `rrsi-mine` miner; its JSON summary comes back on stdout."""
+    cmd = [str(rust_binary()), miner, "--out", str(out), "--jobs", str(jobs), "--since", since]
     if root:
         cmd += ["--root", str(root)]
     for x in exclude:
@@ -137,6 +140,13 @@ def digest(ep: dict, n_ctx: int = 10, width: int = 220) -> str:
             break
         keep.add(i)
     lines = [head, f"  user: {redact(_trunc(ep.get('user_turn', ''), 300))}"]
+    extra = ep.get("extra") or {}
+    for o in extra.get("outcomes", []):
+        lines.append(f"  outcome of message at event {o['event']}: from={'coordinator' if o['coordinator'] else 'peer'} "
+                     f"acted={str(o['acted']).lower()} replied={str(o['replied']).lower()} "
+                     f"retraction={str(o['retraction']).lower()}")
+    if extra.get("other_session"):
+        lines.append(f"  other session: {str(extra['other_session'])[:8]} (project {redact(str(extra.get('other_project', '')))})")
     for i in sorted(keep)[:max(n_ctx, 1) * 2]:
         c = ctx[i]
         tag = c["kind"] + (f"({c['tool']})" if c.get("tool") else "") + ("!" if c.get("is_error") else "")
@@ -182,7 +192,7 @@ def load_labels(out: Path) -> dict[str, dict]:
 
 
 def label(out: Path, episodes: list[dict], complete: Complete, batch: int, jobs: int,
-          log: Callable[[str], None] = print) -> tuple[dict[str, dict], int]:
+          log: Callable[[str], None] = print, system: str | None = None) -> tuple[dict[str, dict], int]:
     """Labels every unlabelled episode; returns (labels, failed batches)."""
     labels = load_labels(out)
     todo = sorted((e for e in episodes if e["id"] not in labels),
@@ -193,7 +203,7 @@ def label(out: Path, episodes: list[dict], complete: Complete, batch: int, jobs:
 
     def one(b: list[dict]) -> list[dict]:
         prompt = "Episodes:\n\n" + "\n\n".join(digest(e) for e in b)
-        got = complete(LABEL_SYSTEM, prompt, LABEL_SCHEMA, out)
+        got = complete(system or LABEL_SYSTEM, prompt, LABEL_SCHEMA, out)
         want = {e["id"] for e in b}
         recs = [{"id": l["id"], "pattern": slug(l["pattern"]), "summary": _trunc(l["summary"], 300),
                  "harness_fixable": bool(l["harness_fixable"])}
@@ -325,6 +335,34 @@ TASK_SCHEMA = {
 }
 
 
+# ------------------------------------------------------------ handoffs
+
+HANDOFF_FIX_KINDS = FIX_KINDS + ["ownership_hook"]
+
+HANDOFF_LABEL_SYSTEM = """You study how several concurrent AI coding agents (Claude Code sessions and their subagents, working for one operator) coordinate, so their harness can make them talk to each other at the right moments.
+Each episode lists the signals a deterministic detector fired: user_relay (the operator carries text between sessions), peer_message / coordinator_message (a message from another session or a coordinator arrived; outcome lines say whether the receiver acted and replied), peer_retraction / peer_churn (a message withdrew, voided or renamed an earlier decision; churn = repeated), message_out (the agent sent a message), vcs_conflict, worktree_collision, file_overlap / branch_overlap (two sessions touched the same file or branch at once), duplicate_work (two sessions opened near-identical issues/PRs), already_done, blocked_on_other, polling (re-running a status check instead of asking), ownership_question, claim.
+For EVERY episode, name the recurring coordination pattern it is an instance of:
+- pattern: a short lowercase snake_case slug naming the generalizable situation, e.g. operator_relays_between_sessions, concurrent_edit_same_file, decision_rename_storm, poll_instead_of_ask, unclear_owner_of_issue, message_acted_on_and_acknowledged.
+- Use "noise" when the signal fired but no coordination was involved (e.g. "another agent" meaning a hypothetical, a conflict the agent itself caused in its own branch).
+- summary: one sentence on what happened and whether talking to another agent would have helped (or whether the message that was sent helped or hurt). No names of people, hosts, secrets or private code.
+- harness_fixable: true if a harness rule or an ownership-state hook would plausibly have handled it."""
+
+HANDOFF_TASK_SYSTEM = f"""You turn one recurring cross-session coordination pattern of AI coding agents (several concurrent Claude Code sessions for one operator) into ONE actionable harness task.
+The harness is what surrounds the model: CLAUDE.md rules, skills, memory files, house-lint gate rules, tools/CLI verbs, docs, and ownership hooks (a planned store of agents, typed addresses and atomic claims on task keys).
+Above all, propose a TRIGGER RULE of the form "when <condition an agent or hook can detect>, message <owner, and how the owner is resolved: claim on the issue/branch/file, the session that last edited the file, the coordinator, ...> with <payload>". Prefer conditions that are mechanically detectable. If the pattern shows messages that HURT (churn, voided decisions), the rule may restrict messaging instead (e.g. batch decisions, send only final rulings).
+proposed_fix.kind is one of {HANDOFF_FIX_KINDS}. priority: P0 (blocks work, frequent) .. P3 (rare/cosmetic).
+exam_candidate: checkable=true only when a before/after can be verified mechanically; describe before, after and the check.
+Write generally: no names of people, hosts, accounts, secrets or private code."""
+
+HANDOFF_TASK_SCHEMA = json.loads(json.dumps(TASK_SCHEMA))
+HANDOFF_TASK_SCHEMA["properties"]["proposed_fix"]["properties"]["kind"]["enum"] = HANDOFF_FIX_KINDS
+HANDOFF_TASK_SCHEMA["required"].append("trigger_rule")
+HANDOFF_TASK_SCHEMA["properties"]["trigger_rule"] = {
+    "type": "object", "additionalProperties": False, "required": ["when", "owner_resolution", "payload", "rule"],
+    "properties": {"when": {"type": "string"}, "owner_resolution": {"type": "string"},
+                   "payload": {"type": "string"}, "rule": {"type": "string"}}}
+
+
 def sample(eps: list[dict], k: int) -> list[dict]:
     """Up to k episodes, spread across sessions first."""
     seen, first, rest = set(), [], []
@@ -335,7 +373,9 @@ def sample(eps: list[dict], k: int) -> list[dict]:
 
 
 def make_tasks(out: Path, groups: list[dict], labels: dict[str, dict], complete: Complete, top: int,
-               min_episodes: int, jobs: int, log: Callable[[str], None] = print) -> tuple[list[dict], int]:
+               min_episodes: int, jobs: int, log: Callable[[str], None] = print,
+               system: str | None = None, schema: dict | None = None) -> tuple[list[dict], int]:
+    system, schema = system or TASK_SYSTEM, schema or TASK_SCHEMA
     tdir = out / "tasks"
     tdir.mkdir(exist_ok=True)
     chosen = [g for g in groups if len(g["episodes"]) >= min_episodes][:top]
@@ -356,8 +396,8 @@ def make_tasks(out: Path, groups: list[dict], labels: dict[str, dict], complete:
                   f"signals {c['signals']}; member patterns {c['patterns']}.\n\n"
                   "Per-episode summaries:\n- " + "\n- ".join(redact(s) for s in summaries) +
                   "\n\nSample episodes:\n\n" + "\n\n".join(digest(e) for e in sample(g["episodes"], 6)))
-        got = complete(TASK_SYSTEM, prompt, TASK_SCHEMA, out)
-        task = {"id": g["key"], **{k: got[k] for k in TASK_SCHEMA["required"]},
+        got = complete(system, prompt, schema, out)
+        task = {"id": g["key"], **{k: got[k] for k in schema["required"]},
                 "evidence": {"episode_ids": ids, **c}, "fingerprint": fp}
         path.write_text(json.dumps(task, indent=1))
         return task
@@ -398,24 +438,26 @@ def _cell(t: str) -> str:
     return " ".join(str(t).split()).replace("|", "\\|")
 
 
-def report(out: Path, run: dict, tasks: list[dict], labels: dict[str, dict], top: int = 15) -> Path:
-    s = run["traces"]
+def report(out: Path, run: dict, tasks: list[dict], labels: dict[str, dict], top: int = 15,
+           mode: "Mode | None" = None) -> Path:
+    mode = mode or MODES["traces"]
+    s = run["summary"]
     lab = Counter("noise" if r["pattern"] == NOISE else "struggle" for r in labels.values())
     lines = [
-        "# Harness struggles: report", "",
+        f"# {mode.title}: report", "",
         f"Generated {run['finished']} by `python -m rrsi harness mine` (backend `{run['backend']}`, model "
-        f"`{run['model']}`). Private: quotes and derives from session transcripts.", "",
+        f"`{run['model']}`, miner `{mode.miner}`). Private: quotes and derives from session transcripts.", "",
         "## Run", "",
         "| Measure | Value |", "|---|---|",
         f"| Transcripts scanned (main + subagent) | {s['transcripts']} ({s['processed']} parsed, "
         f"{s['skipped_unchanged']} unchanged) |",
         f"| Sessions / projects | {s['sessions']} / {s['projects']} |",
         f"| Events | {s['events']} |",
-        f"| Struggle episodes | {s['episodes']} in {s['sessions_with_episodes']} sessions |",
-        f"| Episodes labelled | {len(labels)} ({lab['struggle']} struggles, {lab['noise']} noise) |",
+        f"| Episodes | {s['episodes']} in {s['sessions_with_episodes']} sessions |",
+        f"| Episodes labelled | {len(labels)} ({lab['struggle']} kept, {lab['noise']} noise) |",
         f"| Clusters / tasks emitted | {run['clusters']} / {len(tasks)} |",
         f"| Failed LLM calls | {run['failed_calls']} |",
-        f"| Wall time | traces {run['seconds']['traces']:.1f}s, label {run['seconds']['label']:.0f}s, "
+        f"| Wall time | {mode.miner} {run['seconds']['miner']:.1f}s, label {run['seconds']['label']:.0f}s, "
         f"cluster {run['seconds']['cluster']:.0f}s, tasks {run['seconds']['tasks']:.0f}s, "
         f"total {run['seconds']['total']:.0f}s |", "",
         "### Episodes per signal", "",
@@ -424,16 +466,30 @@ def report(out: Path, run: dict, tasks: list[dict], labels: dict[str, dict], top
     ]
     for sig, n in sorted(s["episodes_per_signal"].items(), key=lambda kv: -kv[1]):
         lines.append(f"| {sig} | {n} | {s['hits_per_signal'].get(sig, 0)} |")
-    lines += ["", f"## Top {min(top, len(tasks))} recurring struggles", "",
+    if "peer" in s:
+        p = s["peer"]
+        pct = (lambda n: f"{n} ({100 * n / p['messages']:.0f}%)") if p["messages"] else str
+        lines += ["", "### Cross-session messages that arrived", "",
+                  "Acted = a tool call before the next turn; replied = a message sent soon after (see the miner).", "",
+                  "| Measure | Value |", "|---|---|",
+                  f"| Messages received | {p['messages']} ({p['from_peers']} from peer sessions, "
+                  f"{p['from_coordinator']} from coordinators; {p['senders']} distinct senders) |",
+                  f"| Receiver acted | {pct(p['acted'])} |", f"| Receiver replied | {pct(p['replied'])} |",
+                  f"| Retractions / renames / voids | {pct(p['retractions'])} |",
+                  f"| Messages sent (SendMessage / send_message) | {p['message_out_calls']} "
+                  f"({p['message_out_failed']} failed) |"]
+    rules = mode.miner == "handoffs"
+    lines += ["", f"## Top {min(top, len(tasks))} recurring {mode.unit}s", "",
               "Counts are measured from the episode records: an episode belongs to the cluster of its label.", "",
-              "| # | Struggle | Episodes | Sessions | Projects | Main signals | Priority | Fix (kind) | Proposed fix |",
+              f"| # | {mode.unit.capitalize()} | Episodes | Sessions | Projects | Main signals | Priority | Fix (kind) | "
+              + ("Trigger rule |" if rules else "Proposed fix |"),
               "|---|---|---|---|---|---|---|---|---|"]
     for k, t in enumerate(tasks[:top], 1):
         ev = t["evidence"]
         sigs = ", ".join(f"{a} {b}" for a, b in list(ev["signals"].items())[:3])
+        last = t["trigger_rule"]["rule"] if rules else t["proposed_fix"]["change"]
         lines.append(f"| {k} | {_cell(t['title'])} | {ev['episodes']} | {ev['sessions']} | {ev['projects']} | "
-                     f"{_cell(sigs)} | {t['priority']} | {t['proposed_fix']['kind']} | "
-                     f"{_cell(t['proposed_fix']['change'])} |")
+                     f"{_cell(sigs)} | {t['priority']} | {t['proposed_fix']['kind']} | {_cell(last)} |")
     lines += ["", "## Details", ""]
     for k, t in enumerate(tasks[:top], 1):
         ev = t["evidence"]
@@ -443,6 +499,9 @@ def report(out: Path, run: dict, tasks: list[dict], labels: dict[str, dict], top
                   f"{ev['first'][:10]} to {ev['last'][:10]}; signals {ev['signals']}",
                   f"- **Root cause (hypothesis):** {t['root_cause_hypothesis']}",
                   f"- **Fix ({t['proposed_fix']['kind']}, {t['priority']}):** {t['proposed_fix']['change']}",
+                  *([f"- **Trigger rule:** {t['trigger_rule']['rule']} (when: {t['trigger_rule']['when']}; owner: "
+                      f"{t['trigger_rule']['owner_resolution']}; payload: {t['trigger_rule']['payload']})"]
+                    if rules else []),
                   f"- **Acceptance:** {t['acceptance_check']}",
                   f"- **Exam candidate:** {'yes' if t['exam_candidate']['checkable'] else 'no'}"
                   + (f" — {t['exam_candidate']['check']}" if t['exam_candidate']['checkable'] else ""), ""]
@@ -451,14 +510,41 @@ def report(out: Path, run: dict, tasks: list[dict], labels: dict[str, dict], top
     return path
 
 
+# ---------------------------------------------------------------- modes
+
+from dataclasses import dataclass  # noqa: E402
+
+
+@dataclass(frozen=True)
+class Mode:
+    """One registered Rust miner plus the prompts that synthesize its episodes."""
+    miner: str
+    summary_file: str
+    label_system: str
+    task_system: str
+    task_schema: dict
+    title: str
+    unit: str
+    out: Path
+
+
+MODES = {
+    "traces": Mode("traces", "traces-summary.json", LABEL_SYSTEM, TASK_SYSTEM, TASK_SCHEMA,
+                   "Harness struggles", "struggle", DEFAULT_OUT),
+    "handoffs": Mode("handoffs", "handoffs-summary.json", HANDOFF_LABEL_SYSTEM, HANDOFF_TASK_SYSTEM,
+                     HANDOFF_TASK_SCHEMA, "Agent handoffs", "coordination pattern", DEFAULT_OUT / "handoffs"),
+}
+
+
 # ---------------------------------------------------------------- main
 
-def mine(out: Path = DEFAULT_OUT, root: Path | None = None, since: str = "", backend: str = "sdk",
+def mine(out: Path | None = None, root: Path | None = None, since: str = "", backend: str = "sdk",
          model: str | None = None, jobs: int = 4, batch: int = 25, top: int = 20, min_episodes: int = 2,
          exclude: list[str] | None = None, skip_traces: bool = False, effort: str = "medium",
-         complete: Complete | None = None, log: Callable[[str], None] = print) -> dict:
+         complete: Complete | None = None, log: Callable[[str], None] = print, miner: str = "traces") -> dict:
     from rrsi.harness.llm import DEFAULT_MODEL
-    out = ensure_private(out.expanduser())
+    mode = MODES[miner]
+    out = ensure_private((out or mode.out).expanduser())
     model = model or DEFAULT_MODEL.get(backend, "")
     if complete is None:
         def complete(system, prompt, schema, o):
@@ -477,14 +563,14 @@ def mine(out: Path = DEFAULT_OUT, root: Path | None = None, since: str = "", bac
     t0 = time.time()
     secs = {}
     if not skip_traces:
-        summary = run_traces(out, root, since, 8, list(exclude or []) + ["rrsi-private"])
+        summary = run_miner(mode.miner, out, root, since, 8, list(exclude or []) + ["rrsi-private"])
     else:
-        summary = json.loads((out / "traces-summary.json").read_text())
-    secs["traces"] = summary.get("seconds", 0.0)
-    log(f"[traces] {summary['episodes']} episodes from {summary['transcripts']} transcripts")
+        summary = json.loads((out / mode.summary_file).read_text())
+    secs["miner"] = summary.get("seconds", 0.0)
+    log(f"[{mode.miner}] {summary['episodes']} episodes from {summary['transcripts']} transcripts")
     episodes = load_episodes(out)
     t = time.time()
-    labels, failed_label = label(out, episodes, complete, batch, jobs, log)
+    labels, failed_label = label(out, episodes, complete, batch, jobs, log, mode.label_system)
     secs["label"] = time.time() - t
     live = {e["id"] for e in episodes}
     labels = {k: v for k, v in labels.items() if k in live}
@@ -493,15 +579,17 @@ def mine(out: Path = DEFAULT_OUT, root: Path | None = None, since: str = "", bac
     secs["cluster"] = time.time() - t
     groups = evidence(episodes, labels, mapping)
     t = time.time()
-    tasks, failed_tasks = make_tasks(out, groups, labels, complete, top, min_episodes, jobs, log)
+    tasks, failed_tasks = make_tasks(out, groups, labels, complete, top, min_episodes, jobs, log,
+                                     mode.task_system, mode.task_schema)
     secs["tasks"] = time.time() - t
-    secs["total"] = time.time() - t0 + secs["traces"]
+    secs["total"] = time.time() - t0 + secs["miner"]
     run = {"finished": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "backend": backend, "model": model,
-           "traces": summary, "clusters": len(groups), "tasks": len(tasks),
+           "miner": mode.miner, "summary": summary, "clusters": len(groups), "tasks": len(tasks),
            "failed_calls": failed_label + failed_tasks, "seconds": secs,
-           "top": [{"title": t["title"], **{k: t["evidence"][k] for k in ("episodes", "sessions", "projects")}}
+           "top": [{"title": t["title"], **{k: t["evidence"][k] for k in ("episodes", "sessions", "projects")},
+                    **({"trigger_rule": t["trigger_rule"]["rule"]} if "trigger_rule" in t else {})}
                    for t in tasks[:15]]}
     (out / "run.json").write_text(json.dumps(run, indent=1))
-    path = report(out, run, tasks, labels)
+    path = report(out, run, tasks, labels, mode=mode)
     log(f"[report] {path}")
     return run

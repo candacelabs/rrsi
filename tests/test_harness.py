@@ -58,7 +58,10 @@ class FakeModel:
             return {"clusters": [{"key": "Blocked Tools", "title": "Tool calls blocked",
                                   "patterns": ["hook_timeout", "permission_blocked", "made_up"]}]}
         self.calls["task"] += 1
-        return {"title": "Stop blocked tool calls", "struggle_pattern": "p", "root_cause_hypothesis": "h",
+        extra = ({"trigger_rule": {"when": "w", "owner_resolution": "o", "payload": "p",
+                                   "rule": "when two sessions edit one file, message the claimant"}}
+                 if "trigger_rule" in schema["properties"] else {})
+        return {**extra, "title": "Stop blocked tool calls", "struggle_pattern": "p", "root_cause_hypothesis": "h",
                 "proposed_fix": {"kind": "tool_cli_fix", "change": "c | d"}, "acceptance_check": "a",
                 "priority": "P1", "exam_candidate": {"checkable": True, "before": "b", "after": "a", "check": "k"}}
 
@@ -107,6 +110,35 @@ class HarnessMinerTest(unittest.TestCase):
         self.assertIn("| 1 | Stop blocked tool calls | 18 | 3 | 2 |", report)
         self.assertIn("c \\| d", report)
         self.assertIn("| hook_timeout | 10 | 20 |", report)
+
+    def test_handoffs_mode_carries_trigger_rules_and_peer_outcomes(self):
+        out = Path(self.tmp.name) / "handoffs"
+        out.mkdir()
+        eps = corpus()
+        eps[0]["extra"] = {"outcomes": [{"event": 0, "from": "x", "coordinator": False, "retraction": True,
+                                         "acted": True, "replied": False}]}
+        eps[1]["extra"] = {"other_session": "abcdef0123456789", "other_project": "proj9"}
+        (out / "episodes.jsonl").write_text("".join(json.dumps(e) + "\n" for e in eps))
+        (out / "handoffs-summary.json").write_text(json.dumps({
+            "transcripts": 3, "processed": 3, "skipped_unchanged": 0, "sessions": 3, "projects": 2, "events": 99,
+            "episodes": len(eps), "episodes_per_signal": {"peer_message": 20}, "hits_per_signal": {"peer_message": 25},
+            "sessions_with_episodes": 3, "seconds": 0.1,
+            "peer": {"messages": 4, "from_peers": 3, "from_coordinator": 1, "acted": 3, "replied": 2,
+                     "retractions": 1, "senders": 2, "message_out_calls": 5, "message_out_failed": 0}}))
+        fake = FakeModel()
+        run = M.mine(miner="handoffs", out=out, skip_traces=True, complete=fake, batch=6, jobs=2, top=5,
+                     log=lambda _: None)
+        self.assertEqual(run["miner"], "handoffs")
+        self.assertEqual(run["top"][0]["trigger_rule"], "when two sessions edit one file, message the claimant")
+        task = json.loads((out / "tasks" / "blocked_tools.json").read_text())
+        self.assertEqual(task["trigger_rule"]["owner_resolution"], "o")
+        report = (out / "REPORT.md").read_text()
+        self.assertIn("# Agent handoffs: report", report)
+        self.assertIn("| Receiver acted | 3 (75%) |", report)
+        self.assertIn("Trigger rule |", report)
+        sent = "\n".join(fake.prompts)
+        self.assertIn("acted=true replied=false retraction=true", sent)
+        self.assertIn("other session: abcdef01", sent)
 
     def test_rerun_is_cached(self):
         self.run_mine(FakeModel())

@@ -13,7 +13,7 @@
 # limitations under the License.
 """`python -m rrsi harness mine ...` (the RRSI loop itself stays in rrsi.py).
 
-    python -m rrsi harness mine [--out ~/rrsi-private/harness] [--root ~/.claude/projects]
+    python -m rrsi harness mine [--miner traces|handoffs] [--out DIR] [--root ~/.claude/projects]
         [--since 2026-09-01] [--backend sdk|copilot|codex] [--model M] [--jobs 4]
         [--batch 25] [--top 20] [--skip-traces]
 """
@@ -31,8 +31,11 @@ def main(argv=None) -> int:
     hs = h.add_subparsers(dest="cmd", required=True)
     m = hs.add_parser("mine", help="traces (Rust) -> label/cluster/tasks (LLM) -> REPORT.md")
     from rrsi.harness.llm import BACKENDS
-    from rrsi.harness.mine import DEFAULT_OUT
-    m.add_argument("--out", type=Path, default=DEFAULT_OUT, help="outside every git work tree")
+    from rrsi.harness.mine import MODES
+    m.add_argument("--miner", choices=sorted(MODES), default="traces",
+                   help="traces: struggles; handoffs: cross-session coordination with trigger rules")
+    m.add_argument("--out", type=Path, default=None,
+                   help="outside every git work tree; default ~/rrsi-private/harness[/handoffs]")
     m.add_argument("--root", type=Path, default=None, help="default ~/.claude/projects")
     m.add_argument("--since", default="", help="only episodes on/after this ISO date")
     m.add_argument("--backend", choices=BACKENDS, default="sdk")
@@ -43,12 +46,13 @@ def main(argv=None) -> int:
     m.add_argument("--top", type=int, default=20, help="clusters that become tasks")
     m.add_argument("--min-episodes", type=int, default=2)
     m.add_argument("--exclude", action="append", default=[], help="skip transcripts whose path contains this")
-    m.add_argument("--skip-traces", action="store_true", help="reuse OUT/episodes.jsonl")
+    m.add_argument("--skip-traces", "--skip-miner", dest="skip_traces", action="store_true",
+                   help="reuse OUT/episodes.jsonl from the last miner run")
     a = ap.parse_args(argv)
     from rrsi.harness.mine import mine
     mine(out=a.out, root=a.root, since=a.since, backend=a.backend, model=a.model, jobs=a.jobs,
          batch=a.batch, top=a.top, min_episodes=a.min_episodes, exclude=a.exclude,
-         skip_traces=a.skip_traces, effort=a.effort)
+         skip_traces=a.skip_traces, effort=a.effort, miner=a.miner)
     return 0
 
 

@@ -31,6 +31,7 @@ macro_rules! register {
 register! {
     git_history => GitHistory,
     traces => Traces,
+    handoffs => Handoffs,
 }
 
 pub fn find(name: &str) -> Option<&'static dyn Miner> {
