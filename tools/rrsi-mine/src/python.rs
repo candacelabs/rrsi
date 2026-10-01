@@ -38,13 +38,7 @@ fn err(e: anyhow::Error) -> PyErr {
 
 /// Toolchains with the CLI's default settings: enough for listing.
 fn listing_toolchains() -> crate::Toolchains {
-    use clap::Parser;
-    #[derive(Parser)]
-    struct Defaults {
-        #[command(flatten)]
-        s: crate::toolchain::settings::Settings,
-    }
-    Defaults::parse_from(["rrsi_mine"]).s.toolchains(600, vec![])
+    crate::toolchain::settings::Settings::default().toolchains(600, vec![])
 }
 
 #[pyfunction]

@@ -20,12 +20,12 @@ use rrsi_mine::fairness::{self as fair, Task};
 use rrsi_mine::llm::{Copilot, ProcessRunner};
 use rrsi_mine::toolchain::settings::{Settings, ToolchainChoice};
 use rrsi_mine::toolchain::Toolchains;
-use rrsi_mine::{history, mine};
+use rrsi_mine::{history, miner, mine};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[derive(Parser)]
-#[command(version, about = "Mine FAIL_TO_PASS-validated tasks (Go, Python, C++, Bazel) from git history")]
+#[command(version, about = "Mine FAIL_TO_PASS-validated tasks (Go, Python, Bazel) from git history; run any registered miner (`rrsi-mine miners`)")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -109,6 +109,11 @@ enum Cmd {
         #[command(flatten)]
         stage: StageArgs,
     },
+    /// List the registered miners (name, inputs, records) as JSON.
+    Miners,
+    /// Any registered miner: `rrsi-mine <name> --key value ...` (see `miners`).
+    #[command(external_subcommand)]
+    Miner(Vec<String>),
     /// Fairness stages 1-6 in order.
     Fairness {
         #[command(flatten)]
@@ -237,6 +242,15 @@ fn main() -> Result<()> {
             let repo = repo.as_deref().map(canonical).transpose()?;
             fair::run_stage("specificity", &load(&stage)?, stage.jobs, stage.force,
                             |t| fair::specificity(repo.as_deref(), t))?;
+        }
+        Cmd::Miners => {
+            let all: Vec<_> = rrsi_mine::miners::registry().iter().map(|m| miner::describe(*m)).collect();
+            println!("{}", serde_json::to_string_pretty(&all)?);
+        }
+        Cmd::Miner(argv) => {
+            let (name, rest) = argv.split_first().context("miner name")?;
+            let summary = miner::run(name, miner::args_from_cli(rest)?)?;
+            println!("{}", serde_json::to_string_pretty(&summary)?);
         }
         Cmd::Gate { stage } => gate(&stage, &load(&stage)?)?,
         Cmd::Fairness { stage, repo, runs, go, llm } => {

@@ -44,6 +44,8 @@ coding = [
     # Terminal-Bench 2.1 / SWE-bench Verified through harbor
     "harbor>=0.18",
 ]
+# python -m rrsi harness mine: the LLM stage on the logged-in Claude Code
+harness = ["claude-agent-sdk>=0.2"]
 dev = ["pytest>=7.0"]
 
 [build-system]

@@ -64,6 +64,19 @@ pub struct Settings {
     pub prefetch_timeout: u64,
 }
 
+impl Default for Settings {
+    /// The command line's defaults (and RRSI_* environment).
+    fn default() -> Self {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct Defaults {
+            #[command(flatten)]
+            s: Settings,
+        }
+        Defaults::parse_from(["rrsi-mine"]).s
+    }
+}
+
 /// The values of `NAME=VALUE` entries for `name`, in order.
 fn values<'a>(entries: &'a [String], name: &str) -> impl Iterator<Item = &'a str> + 'a {
     let prefix = format!("{name}=");

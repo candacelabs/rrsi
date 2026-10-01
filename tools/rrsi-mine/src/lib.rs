@@ -43,6 +43,10 @@
 //! rrsi-mine fairness --tasks DIR --repo PATH [--jobs 2] [--only SHA12] [--force]
 //! rrsi-mine flake|api|describe|probe|specificity|gate --tasks DIR ...
 //! ```
+//!
+//! Miners are plugins (src/miner.rs, src/miners/): this git-history miner is
+//! registered as `git-history`, and `traces` (src/miners/traces.rs) mines
+//! agent struggles from Claude Code session transcripts.
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -528,7 +532,10 @@ pub mod fairness;
 pub mod history;
 pub mod llm;
 pub mod scan;
+pub mod miner;
+pub mod miners;
 pub mod toolchain;
+pub mod transcript;
 
 pub use toolchain::{Toolchain, Toolchains};
 
