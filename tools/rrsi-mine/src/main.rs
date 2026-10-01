@@ -19,7 +19,7 @@ use clap::{Args, Parser, Subcommand};
 use rrsi_mine::fairness::{self as fair, Task};
 use rrsi_mine::llm::{Copilot, ProcessRunner};
 use rrsi_mine::csf::{self, MineCsf};
-use rrsi_mine::{candidates, miner, mine, scan, Docker};
+use rrsi_mine::{miner, mine, scan, Docker};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 

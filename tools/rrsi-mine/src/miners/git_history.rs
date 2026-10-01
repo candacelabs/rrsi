@@ -41,6 +41,24 @@ struct Args {
     modcache: String,
     #[serde(default = "buildcache")]
     buildcache: String,
+    /// csfc binary for CSF-aware mining (otherwise RRSI_CSFC or PATH).
+    #[serde(default)]
+    csfc: Option<PathBuf>,
+    /// Grammar file passed to csfc.
+    #[serde(default)]
+    csf_grammar: Option<PathBuf>,
+    /// Extra architecture source paths, as in `rrsi-mine csf detect --csf-source`.
+    #[serde(default)]
+    csf_source: Vec<String>,
+    /// A `csfc emit --format json` model to use instead of running csfc.
+    #[serde(default)]
+    csf_model: Option<PathBuf>,
+    /// Repository-relative directory the csf_model paths are relative to.
+    #[serde(default)]
+    csf_root: Option<String>,
+    /// Revision whose architecture csfc reads when there is no csf_model.
+    #[serde(default = "csf_model_rev")]
+    csf_model_rev: String,
     #[serde(default = "test_timeout")]
     test_timeout: u64,
 }
@@ -49,6 +67,10 @@ fn since() -> String { "2026-06-01".into() }
 fn jobs() -> usize { 4 }
 fn image() -> String { "golang:1.26.5".into() }
 fn modcache() -> String { "rrsi-gomodcache".into() }
+fn csf_model_rev() -> String {
+    "HEAD".into()
+}
+
 fn buildcache() -> String { "rrsi-gobuildcache".into() }
 fn test_timeout() -> u64 { 600 }
 
@@ -62,7 +84,13 @@ impl Miner for GitHistory {
           ("since", "first commit date, default 2026-06-01"), ("jobs", "parallel validations, default 4"),
           ("limit", "at most this many candidates, 0 = all"), ("image", "Go image, default golang:1.26.5"),
           ("modcache", "module cache volume"), ("buildcache", "build cache volume"),
-          ("test_timeout", "seconds per go test, default 600")]
+          ("test_timeout", "seconds per go test, default 600"),
+          ("csfc", "csfc binary for CSF-aware mining (optional)"),
+          ("csf_grammar", "grammar file for csfc (optional)"),
+          ("csf_source", "extra architecture source paths (optional)"),
+          ("csf_model", "csfc emit --format json model instead of running csfc (optional)"),
+          ("csf_root", "directory the csf_model paths are relative to (optional)"),
+          ("csf_model_rev", "revision csfc reads, default HEAD")]
     }
     fn records(&self) -> &'static [(&'static str, &'static str)] {
         &[("index.jsonl", "one validated or rejected candidate commit per line"),
@@ -79,7 +107,10 @@ impl Miner for GitHistory {
         let n = cands.len();
         let docker = crate::Docker { image: &a.image, modcache: &a.modcache, buildcache: &a.buildcache,
                                      test_timeout: a.test_timeout };
-        crate::mine(&repo, &a.out, cands, a.jobs, &docker)?;
+        let model = a.csf_model.as_deref().map(|f| (f, a.csf_root.as_deref().unwrap_or("")));
+        let csf = crate::csf::MineCsf::resolve(&repo, &a.csf_model_rev, a.csfc.as_deref(),
+                                               a.csf_grammar.as_deref(), &a.csf_source, model)?;
+        crate::mine(&repo, &a.out, cands, a.jobs, &docker, &csf)?;
         Ok(json!({"candidates": n, "out": a.out}))
     }
 }
