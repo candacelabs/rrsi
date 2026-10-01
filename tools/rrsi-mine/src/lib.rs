@@ -356,6 +356,11 @@ pub fn validate(repo: &Path, out: &Path, cand: &Candidate, tc: &dyn Toolchain) -
     std::fs::write(tdir.join("tests.patch"), &tests_patch)?;
     std::fs::write(tdir.join("src.patch"), diff(&cand.src_files)?)?;
 
+    // A toolchain with one shared prefetch slot validates one task at a
+    // time, so no other task's prefetch lands between this one's prefetch
+    // and run.
+    static SERIAL: Mutex<()> = Mutex::new(());
+    let _serial = tc.prefetch_before_each_run().then(|| SERIAL.lock().unwrap_or_else(|p| p.into_inner()));
     let work = tempfile::Builder::new().prefix("rrsi-mine-").tempdir()?;
     let (parent, commit) = (work.path().join("parent"), work.path().join("commit"));
     export_tree(repo, &cand.parent, &parent)?;
