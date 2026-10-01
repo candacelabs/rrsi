@@ -134,8 +134,10 @@ export PYTHONDONTWRITEBYTECODE=1 HOME=/tmp
 
 /// Lines that mean the run never reached the code: no network, no
 /// environment, a missing pytest plugin or option.
-pub const INFRA_MARKERS: [&str; 10] = [
+pub const INFRA_MARKERS: [&str; 11] = [
     "rrsi: dependency environment",
+    // A program the tests shell out to is not in the image.
+    ": command not found",
     "Temporary failure in name resolution",
     "Name or service not known",
     "Could not resolve host",
@@ -168,6 +170,14 @@ pub fn blamed_module(line: &str) -> Option<&str> {
     None
 }
 
+/// `FileNotFoundError: [Errno 2] No such file or directory: 'docker'`: a
+/// subprocess named a program (no path) the image lacks.
+pub fn missing_program(line: &str) -> bool {
+    let marker = "FileNotFoundError: [Errno 2] No such file or directory: '";
+    line.find(marker).and_then(|i| quoted(&line[i + marker.len() - 1..]))
+        .is_some_and(|p| !p.is_empty() && !p.contains('/'))
+}
+
 fn top(module: &str) -> &str {
     module.split('.').next().unwrap_or(module)
 }
@@ -197,7 +207,7 @@ pub fn classify(exit: i32, log: &str, own: &BTreeSet<String>) -> Outcome {
                 return Outcome::Infra;
             }
         }
-        if INFRA_MARKERS.iter().any(|m| line.contains(m)) {
+        if INFRA_MARKERS.iter().any(|m| line.contains(m)) || missing_program(line) {
             return Outcome::Infra;
         }
     }
@@ -446,6 +456,24 @@ mod tests {
     #[test]
     fn a_missing_attribute_of_a_module_loaded_by_the_tests_is_a_failing_test() {
         assert_eq!(classify(1, LOADED_SCRIPT_ATTRIBUTE, &own(&["tests", "test_cli"])), Outcome::TestFail);
+    }
+
+    // Regression, 2026-10-01 (task 36c9572bfd53): a test running a shell
+    // script that needs jq, which the pinned image lacks. The run never
+    // reached the code: infrastructure, not a failing commit.
+    const MISSING_PROGRAM: &str = "E     AssertionError: /src/.github/actions/verified-check/receipt.sh: \
+        line 5: jq: command not found\n\
+        FAILED tools/tests/test_root_workflow_syntax.py::test_verified_receipts_use_the_same_relative_cache_path\n";
+
+    #[test]
+    fn a_program_missing_from_the_image_is_infra() {
+        let mine = own(&["tools"]);
+        assert_eq!(classify(1, MISSING_PROGRAM, &mine), Outcome::Infra);
+        assert_eq!(classify(1, "E   FileNotFoundError: [Errno 2] No such file or directory: 'docker'\n\
+                                FAILED tests/test_x.py::test_build\n", &mine), Outcome::Infra);
+        // A missing data file of the repository is the tests failing.
+        assert_eq!(classify(1, "E   FileNotFoundError: [Errno 2] No such file or directory: '/src/a/b.json'\n\
+                                FAILED tests/test_x.py::test_read\n", &mine), Outcome::TestFail);
     }
 
     #[test]
