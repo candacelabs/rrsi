@@ -46,8 +46,10 @@
 //! ```
 //!
 //! Miners are plugins (src/miner.rs, src/miners/): this git-history miner is
-//! registered as `git-history`, and `traces` (src/miners/traces.rs) mines
-//! agent struggles from Claude Code session transcripts.
+//! registered as `git-history`, `traces` (src/miners/traces.rs) mines
+//! agent struggles from Claude Code session transcripts, and `slices`
+//! (src/miners/slices.rs) mines only the commits of merged slice PRs, tagging
+//! each task with its slice and the ontology signals its fix moved.
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
