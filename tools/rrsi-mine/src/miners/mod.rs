@@ -33,6 +33,7 @@ register! {
     traces => Traces,
     handoffs => Handoffs,
     slices => Slices,
+    pr_gap => PrGap,
 }
 
 pub fn find(name: &str) -> Option<&'static dyn Miner> {
