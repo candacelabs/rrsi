@@ -349,7 +349,7 @@ mod tests {
         assert_eq!(classify_file("bazel/defs.bzl"), FileKind::Source);
         assert_eq!(classify_file("pkg/api.pb.go"), FileKind::Generated);
         assert_eq!(classify_file("pkg/README.md"), FileKind::Other);
-        assert!(is_root_marker("candace/MODULE.bazel") && is_root_marker("WORKSPACE"));
+        assert!(is_root_marker("ws/MODULE.bazel") && is_root_marker("WORKSPACE"));
         assert!(!is_root_marker("BUILD.bazel"));
     }
 
@@ -415,11 +415,11 @@ mod tests {
         ERROR: Analysis of target '//pkg/cron:cron_test' failed; build aborted: Analysis failed\n\
         INFO: Build did NOT complete successfully\n";
 
-    const OWN_TARGET_MISSING: &str = "$ bazel test //pkg/warden/election:election_test\nexit=1\n\
-        ERROR: /src/pkg/warden/election/BUILD.bazel:30:8: no such package 'pkg/warden/internal/transportidentity': \
+    const OWN_TARGET_MISSING: &str = "$ bazel test //pkg/fleet/election:election_test\nexit=1\n\
+        ERROR: /src/pkg/fleet/election/BUILD.bazel:30:8: no such package 'pkg/fleet/internal/peerauth': \
         BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n\
-        \x20- /src/pkg/warden/internal/transportidentity and referenced by '//pkg/warden/election:election_test'\n\
-        ERROR: Analysis of target '//pkg/warden/election:election_test' failed; build aborted: Analysis failed\n\
+        \x20- /src/pkg/fleet/internal/peerauth and referenced by '//pkg/fleet/election:election_test'\n\
+        ERROR: Analysis of target '//pkg/fleet/election:election_test' failed; build aborted: Analysis failed\n\
         INFO: Build did NOT complete successfully\n";
 
     const OWN_SOURCE_MISSING: &str = "ERROR: /src/pkg/box/BUILD.bazel:3:11: missing input file '//pkg/box:limit.go'\n\

@@ -474,12 +474,12 @@ mod tests {
     // is a failing test, never infrastructure.
     const LOADED_SCRIPT_ATTRIBUTE: &str = "$ pytest ./tests/test_cli.py\nexit=1\n\
         ............................................FFFFF.F.............         [100%]\n\
-        >       group = CANDACE.rrsi_commands\n\
-        E     AttributeError: module 'candace_cli_under_test' has no attribute 'rrsi_commands'. \
-        Did you mean: 'ai_commands'?\n\
+        >       group = CLI.mine_commands\n\
+        E     AttributeError: module 'cli_under_test' has no attribute 'mine_commands'. \
+        Did you mean: 'run_commands'?\n\
         tests/test_cli.py:180: AttributeError\n\
         =========================== short test summary info ============================\n\
-        FAILED tests/test_cli.py::CandaceCliTests::test_research_rrsi_drives_the_rust_miner_on_this_checkout\n\
+        FAILED tests/test_cli.py::CliTests::test_mine_drives_the_miner_on_this_checkout\n\
         ========================= 6 failed, 58 passed in 9.12s =========================\n";
 
     #[test]
@@ -490,9 +490,9 @@ mod tests {
     // Regression, 2026-10-01 (task 36c9572bfd53): a test running a shell
     // script that needs jq, which the pinned image lacks. The run never
     // reached the code: infrastructure, not a failing commit.
-    const MISSING_PROGRAM: &str = "E     AssertionError: /src/.github/actions/verified-check/receipt.sh: \
+    const MISSING_PROGRAM: &str = "E     AssertionError: /src/ci/receipt.sh: \
         line 5: jq: command not found\n\
-        FAILED tools/tests/test_root_workflow_syntax.py::test_verified_receipts_use_the_same_relative_cache_path\n";
+        FAILED tools/tests/test_workflows.py::test_receipts_use_one_cache_path\n";
 
     #[test]
     fn a_program_missing_from_the_image_is_infra() {
