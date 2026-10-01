@@ -134,8 +134,10 @@ export PYTHONDONTWRITEBYTECODE=1 HOME=/tmp
 
 /// Lines that mean the run never reached the code: no network, no
 /// environment, a missing pytest plugin or option.
-pub const INFRA_MARKERS: [&str; 11] = [
+pub const INFRA_MARKERS: [&str; 12] = [
     "rrsi: dependency environment",
+    // The tree under test is not a git checkout (see [`snapshot_as_git`]).
+    "fatal: not a git repository",
     // A program the tests shell out to is not in the image.
     ": command not found",
     "Temporary failure in name resolution",
@@ -264,6 +266,26 @@ pub fn own_modules(root: &Path, units: &[String], fix_files: &[String]) -> BTree
     own
 }
 
+/// Make the exported `tree` a one-commit git checkout, so suites that ask
+/// git about the checkout (`git ls-files`, `git rev-parse`) see the tree
+/// they test. Host-side, before any container; a tree that is already a
+/// checkout is left alone.
+pub fn snapshot_as_git(tree: &Path) -> Result<()> {
+    if tree.join(".git").exists() {
+        return Ok(());
+    }
+    for args in [&["init", "-q"][..], &["add", "-A"], &["commit", "-q", "--no-verify", "-m", "rrsi: tree under test"]] {
+        let ok = std::process::Command::new("git").args(["-c", "commit.gpgsign=false"]).args(args)
+            .current_dir(tree)
+            .env("GIT_AUTHOR_NAME", "rrsi").env("GIT_AUTHOR_EMAIL", "rrsi@example.invalid")
+            .env("GIT_COMMITTER_NAME", "rrsi").env("GIT_COMMITTER_EMAIL", "rrsi@example.invalid")
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+            .status()?.success();
+        anyhow::ensure!(ok, "git {args:?} in {}", tree.display());
+    }
+    Ok(())
+}
+
 impl Python {
     fn run<'a>(&'a self, tree: &'a Path, cand: &Candidate, network: bool, script: String) -> Run<'a> {
         Run { sandbox: &self.sandbox, network, tree, mounts: vec![
@@ -303,6 +325,7 @@ impl Toolchain for Python {
     }
 
     fn prefetch(&self, tree: &Path, cand: &Candidate) -> Result<(bool, String)> {
+        snapshot_as_git(tree)?;
         super::own_volume(&self.sandbox.image, &self.deps, tree)?;
         let (code, log) = self.run(tree, cand, true, prefetch_script()).exec()?;
         Ok((code == 0, log))
@@ -480,6 +503,21 @@ mod tests {
         // A missing data file of the repository is the tests failing.
         assert_eq!(classify(1, "E   FileNotFoundError: [Errno 2] No such file or directory: '/src/a/b.json'\n\
                                 FAILED tests/test_x.py::test_read\n", &mine), Outcome::TestFail);
+    }
+
+    // Regression, 2026-10-01 (task 0a17de099c17): repository-gate suites run
+    // `git ls-files` on the tree under test; an exported tree is no checkout.
+    #[test]
+    fn the_tree_under_test_is_a_git_checkout() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("a.py"), "").unwrap();
+        snapshot_as_git(d.path()).unwrap();
+        let out = std::process::Command::new("git").args(["ls-files"]).current_dir(d.path()).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "a.py\n");
+        snapshot_as_git(d.path()).unwrap();
+        assert_eq!(classify(1, "E   ScanError: git ls-files failed: fatal: not a git repository (or any parent \
+                                up to mount point /)\nFAILED tools/tests/test_x.py::test_scan\n", &own(&["tools"])),
+                   Outcome::Infra, "a run that still is not in a checkout proved nothing");
     }
 
     #[test]
