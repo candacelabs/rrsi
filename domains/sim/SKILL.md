@@ -9,7 +9,7 @@ and may be much weaker than you. Only the files under `harness/` evolve:
 
 Each round draws candidate harnesses from the incumbent. Each is screened by a
 leakage critic, smoke-tested on two scenarios (on the surrogate plant), then
-evaluated on all 8 practice scenarios with k trials each. Every submitted
+evaluated on all 24 practice scenarios with k trials each. Every submitted
 controller is checked by CSF, executed in the graded simulator, and scored by
 four oracles: reached goal in time, no collision or lane departure, within the
 speed limit with no runtime fallback, and settled (centred and aligned) at the

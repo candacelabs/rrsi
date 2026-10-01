@@ -33,14 +33,17 @@ import random
 PROFILE = {"lane_half_width_metres": 2.0, "tick_milliseconds": 100, "curvature": 0.0}
 GOAL_FRACTION = 0.75       # goal = 75% of the distance at target speed for the whole episode
 SPEED_LIMIT_FACTOR = 1.25  # oracle: never faster than 1.25 x target speed
-PRACTICE_SEEDS = tuple(range(100, 108))
-HELDOUT_SEEDS = tuple(range(300, 304))
+# 24 practice and 8 held-out scenarios: with k = 3 that is 72 graded episodes
+# per evaluation, which is what keeps the measured noise band near 0.1 when
+# the policy's sampling cannot be made deterministic (see README "Noise band").
+PRACTICE_SEEDS = tuple(range(100, 124))
+HELDOUT_SEEDS = tuple(range(300, 308))
 
 
 def make(seed: int) -> dict:
     rng = random.Random(seed)
-    target = round(rng.uniform(7.0, 14.0), 1)
-    seconds = rng.choice((12, 14, 16, 18, 20))
+    target = round(rng.uniform(5.0, 18.0), 1)
+    seconds = rng.choice((10, 12, 14, 16, 18, 20, 24))
     scenario = {
         "schema_version": 1,
         "name": f"straight-{seed}",
@@ -49,8 +52,8 @@ def make(seed: int) -> dict:
         "tick_milliseconds": PROFILE["tick_milliseconds"],
         "target_speed_mps": target,
         "lane_half_width_metres": PROFILE["lane_half_width_metres"],
-        "initial_lateral_metres": round(rng.uniform(-1.2, 1.2), 2),
-        "initial_heading_radians": round(rng.uniform(-0.08, 0.08), 3),
+        "initial_lateral_metres": round(rng.uniform(-1.6, 1.6), 2),
+        "initial_heading_radians": round(rng.uniform(-0.15, 0.15), 3),
     }
     return {"id": scenario["name"], "seed": seed, "scenario": scenario,
             "goal_metres": round(GOAL_FRACTION * target * seconds, 1),

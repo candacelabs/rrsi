@@ -87,7 +87,7 @@ def controller(lateral=-250, heading=-500, speed=500, name="pd"):
 
 
 def test_splits_are_disjoint_and_in_the_straight_profile():
-    assert len(scenarios.EVOLVE) == 8 and len(scenarios.HELDOUT_IDS) == 4
+    assert len(scenarios.EVOLVE) == 24 and len(scenarios.HELDOUT_IDS) == 8
     assert not set(scenarios.EVOLVE) & set(scenarios.HELDOUT_IDS)
     for task in scenarios.PRACTICE + scenarios.HELDOUT:
         s = task["scenario"]
@@ -192,7 +192,8 @@ def run_job(tmp_path, ids, k, policy, engine, job="j"):
 
 def test_runner_end_to_end_with_receipts_and_scoring(tmp_path):
     ids = scenarios.EVOLVE[:3]
-    policy = ScriptedPolicy(lambda brief: submit(controller()) if "1.08 m left" not in brief else "no json")
+    skipped = scenarios.brief(scenarios.BY_ID[ids[0]])
+    policy = ScriptedPolicy(lambda brief: submit(controller()) if skipped not in brief else "no json")
     runs, grades = run_job(tmp_path, ids, 2, policy, engines.FakeEngine())
     assert len(grades) == 6 and "infra" not in grades
     tdir = runs / "jobs" / "j" / ids[1] / "t0"
@@ -202,8 +203,8 @@ def test_runner_end_to_end_with_receipts_and_scoring(tmp_path):
     dom = load_domain("sim")
     per, extra = dom.score(runs, "j", ids, 2)
     assert set(per) == set(ids) and extra["infra_rate"] == 0.0 and extra["sim_seconds"] > 0
-    # straight-100 starts 1.08 m left: the scripted policy never submits there.
-    assert per["straight-100"].rewards == [0.0, 0.0] and extra["no_submission_rate"] == pytest.approx(2 / 6)
+    # The scripted policy never submits on the first scenario.
+    assert per[ids[0]].rewards == [0.0, 0.0] and extra["no_submission_rate"] == pytest.approx(2 / 6)
     assert all(c is not None and c > 100 for c in per[ids[1]].tokens), "cost = tokens + simulated seconds"
     rec = dom.load_trial(runs, "j", ids[1], 0)
     text = dom.render_trace(rec)
@@ -280,3 +281,26 @@ def test_fake_semantics_match_the_csf_go_runtime():
         action = json.loads(out.stdout)["action"]
         assert (int(action.get("steering", 0)), int(action.get("acceleration", 0))) == fake_engine.act(c, features)
     assert engines._go_compile({"schema_version": 1, "name": "r"})[0] is False
+
+
+def test_any_command_honouring_the_contract_is_an_engine(tmp_path):
+    script = tmp_path / "engine.py"
+    script.write_text(
+        "import argparse, json, sys\n"
+        f"sys.path.insert(0, {str(SIM / 'bench')!r})\n"
+        "import fake_engine\n"
+        "ap = argparse.ArgumentParser(); ap.add_argument('--jobs'); ap.add_argument('--output')\n"
+        "ap.add_argument('--run-id'); a = ap.parse_args()\n"
+        "from pathlib import Path\n"
+        "jobs = json.loads(Path(a.jobs).read_text())['episodes']\n"
+        "fake_engine.run_batch(jobs, Path(a.output), a.run_id)\n")
+    task = scenarios.PRACTICE[0]
+    jobs = [{"id": "e", "scenario": task["scenario"], "goal_metres": task["goal_metres"],
+             "controller": controller()}]
+    facts = engines.CommandEngine("command", [sys.executable, str(script)]).execute(jobs, tmp_path / "out", "r1")
+    assert facts["exit"] == 0 and oracles.grade(tmp_path / "out" / "e", task)["status"] == "ok"
+    with pytest.raises(engines.InfraError, match="without batch.json"):
+        engines.CommandEngine("broken", [sys.executable, "-c", "raise SystemExit(3)"]).execute(
+            jobs, tmp_path / "out2", "r2")
+    with pytest.raises(engines.InfraError):
+        engines.CommandEngine("none", [])

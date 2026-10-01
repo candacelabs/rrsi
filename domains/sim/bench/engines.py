@@ -11,33 +11,50 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Engines that execute a batch of (scenario, controller) episodes.
+"""The engine interface: submit episodes (scenario + controller), get results.
 
-CSF (Candace Labs' Go framework for AI-agent systems, developer preview; see
-domains/sim/README.md) owns the worker these engines run. `candace` is the
-operator CLI of the monorepo that hosts CSF.
+The domain never talks to a simulator directly. An engine takes a batch of
+episodes, each {"id", "scenario", "goal_metres", "controller"} (the scenario
+and controller as generated protobuf JSON of CSF, Candace Labs' Go framework
+for AI-agent systems, in developer preview; see domains/sim/README.md), and
+writes one result directory per episode id into `out`, plus `batch.json`:
 
-RRSI_SIM_ENGINE selects one:
+  manifest.json  "status": completed | rejected | infra, "termination",
+                 "steps_completed", "simulation_seconds", "reason"
+  events.jsonl   one ResearchEvent JSON row per measurement per physics step
+                 (scenario_longitudinal_metres, scenario_lateral_metres,
+                 scenario_heading_error_radians, simulator_speed_mps,
+                 scenario_collisions, runtime_fallbacks)
+  trace.jsonl    one row per physics step (observation, action, state)
 
-  fake   bench/fake_engine.py, in process, no dependencies (tests and CI)
-  cpu    CSF's scenario worker on the CPU HighwayEnv plant of CSF's training
-         harness, with the Go runtime; needs RRSI_SIM_CSF_ROOT (the `csf`
-         directory of a candace checkout), RRSI_SIM_CSF_RUNTIME and `uv`
-  carla  the same worker in the pinned CARLA 0.9.16 container, started with
-         `candace csf simulator run carla` (RRSI_SIM_CANDACE, default
-         `candace`); needs the GPU to itself. Peak VRAM is sampled with
-         nvidia-smi during the batch and saved as vram.json.
+`rejected` means the controller failed admission (a controller result);
+`infra` means the engine failed (never a controller result). Anything that
+honours this contract can be an engine: CSF's scenario worker today, a
+ROS-side controller or a direct simulator container later, with no change to
+the domain. RRSI_SIM_ENGINE selects one:
 
-Every engine writes the CSF batch layout into `out`: batch.json plus one
-directory per episode id with manifest.json, events.jsonl and trace.jsonl.
-`check` is the admission test the agent's `check` tool uses: the Go runtime's
-compile when RRSI_SIM_CSF_RUNTIME is set, otherwise the fake mirror.
+  fake     bench/fake_engine.py, in process, no dependencies (tests and CI)
+  command  any executable: RRSI_SIM_ENGINE_COMMAND is its argv, and the engine
+           appends `--jobs FILE --output DIR --run-id ID`
+  cpu      a `command` preset: CSF's scenario worker on the CPU HighwayEnv
+           plant of CSF's training harness with the Go runtime (needs
+           RRSI_SIM_CSF_ROOT, the `csf` directory of a candace checkout,
+           RRSI_SIM_CSF_RUNTIME and `uv`)
+  carla    a `command` preset: the same worker in the pinned CARLA 0.9.16
+           container through `candace csf simulator run carla` (`candace` is
+           the operator CLI of the monorepo that hosts CSF; RRSI_SIM_CANDACE).
+           Needs the GPU to itself; peak VRAM is sampled with nvidia-smi
+           during the batch and saved as vram.json.
+
+`check` is the admission test behind the agent's `check` tool: the CSF Go
+runtime's compile when RRSI_SIM_CSF_RUNTIME is set, otherwise the fake mirror.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import threading
@@ -85,6 +102,8 @@ def _go_compile(controller) -> tuple[bool, str]:
 
 
 class Engine:
+    """Submit a batch of episodes; results land in `out` (see the module doc)."""
+
     name = "base"
 
     def execute(self, jobs: list[dict], out: Path, run_id: str) -> dict:
@@ -105,38 +124,49 @@ class FakeEngine(Engine):
                 "wall_seconds": time.monotonic() - started}
 
 
-def _write_jobs(jobs: list[dict], path: Path) -> None:
+def write_jobs(jobs: list[dict], path: Path) -> None:
     path.write_text(json.dumps({"format": "csf-scenario-jobs-v1", "episodes": [
         {"id": j["id"], "scenario": j["scenario"], "goal_metres": j["goal_metres"],
          "controller": j.get("controller")} for j in jobs]}, indent=1))
 
 
-class CpuEngine(Engine):
-    name = "cpu"
+class CommandEngine(Engine):
+    """Any executable honouring the contract: argv + --jobs/--output/--run-id."""
+
+    def __init__(self, name: str, argv: list[str], env: dict | None = None, sample_vram: bool = False):
+        if not argv:
+            raise InfraError(f"engine {name!r} has no command")
+        self.name, self.argv, self.env, self.sample_vram = name, list(argv), env, sample_vram
 
     def execute(self, jobs, out, run_id):
-        if not CSF_ROOT or not CSF_RUNTIME:
-            raise InfraError("cpu engine needs RRSI_SIM_CSF_ROOT and RRSI_SIM_CSF_RUNTIME")
-        root = Path(CSF_ROOT)
-        out.mkdir(parents=True, exist_ok=True)
-        jobs_path = out / "jobs.json"
-        _write_jobs(jobs, jobs_path)
-        cmd = ["uv", "run", "--quiet", "--project", str(root / "examples" / "training"), "--locked",
-               "python", str(root / "examples" / "simulators" / "scenario_worker.py"),
-               "--plant", "highway", "--jobs", str(jobs_path), "--output", str(out),
-               "--run-id", run_id, "--runtime", CSF_RUNTIME]
-        # The worker imports the training runtime client and the generated
-        # protobuf contract from PYTHONPATH, as it does inside the CARLA image.
-        env = {**os.environ, "PYTHONPATH": os.pathsep.join(
-            [str(root / "examples" / "training"), str(root / "tools" / "codegen" / "generated" / "python")])}
+        out = out.resolve()
+        out.parent.mkdir(parents=True, exist_ok=True)
+        staging = out.parent / f"{out.name}.jobs.json"
+        write_jobs(jobs, staging)
+        cmd = [*self.argv, "--jobs", str(staging), "--output", str(out), "--run-id", run_id]
+        env = {**os.environ, **(self.env or {})}
         started = time.monotonic()
-        with (out / "worker.log").open("w") as log:
-            code = subprocess.call(cmd, stdout=log, stderr=subprocess.STDOUT, timeout=BATCH_TIMEOUT, env=env)
+        sampler = VramSampler() if self.sample_vram else None
+        try:
+            if sampler:
+                sampler.__enter__()
+            result = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=BATCH_TIMEOUT + 120)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise InfraError(f"engine {self.name} did not run: {error}") from error
+        finally:
+            if sampler:
+                sampler.__exit__()
+        facts = {"engine": self.name, "exit": result.returncode, "wall_seconds": time.monotonic() - started,
+                 "log_tail": (result.stdout + result.stderr)[-1500:]}
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "engine.log").write_text(result.stdout + result.stderr)
+        if sampler:
+            facts["vram"] = sampler.summary()
+            (out / "vram.json").write_text(json.dumps({"samples": sampler.samples, **facts["vram"]}))
         if not (out / "batch.json").is_file():
-            raise InfraError(f"cpu worker exited {code} without batch.json (see {out / 'worker.log'})")
-        batch = json.loads((out / "batch.json").read_text())
-        return {"engine": self.name, "simulator": batch.get("simulator"), "exit": code,
-                "wall_seconds": time.monotonic() - started}
+            raise InfraError(f"engine {self.name} exited {result.returncode} without batch.json: {facts['log_tail']}")
+        facts["simulator"] = json.loads((out / "batch.json").read_text()).get("simulator")
+        return facts
 
 
 class VramSampler:
@@ -174,36 +204,37 @@ class VramSampler:
                 "total_mib": self.samples[0][2]}
 
 
-class CarlaEngine(Engine):
-    name = "carla"
+def cpu_engine() -> CommandEngine:
+    if not CSF_ROOT or not CSF_RUNTIME:
+        raise InfraError("cpu engine needs RRSI_SIM_CSF_ROOT and RRSI_SIM_CSF_RUNTIME")
+    root = Path(CSF_ROOT)
+    # The worker imports the training runtime client and the generated
+    # protobuf contract from PYTHONPATH, as it does inside the CARLA image.
+    env = {"PYTHONPATH": os.pathsep.join([str(root / "examples" / "training"),
+                                          str(root / "tools" / "codegen" / "generated" / "python")])}
+    return CommandEngine("cpu", ["uv", "run", "--quiet", "--project", str(root / "examples" / "training"),
+                                 "--locked", "python", str(root / "examples" / "simulators" / "scenario_worker.py"),
+                                 "--plant", "highway", "--runtime", CSF_RUNTIME], env)
 
-    def execute(self, jobs, out, run_id):
-        if shutil.which(CANDACE) is None and not Path(CANDACE).is_file():
-            raise InfraError(f"candace CLI not found ({CANDACE}); set RRSI_SIM_CANDACE")
-        staging = out.parent / f"{out.name}.jobs.json"
-        _write_jobs(jobs, staging)
-        cmd = [CANDACE, "csf", "simulator", "run", "carla", "--jobs", str(staging.resolve()),
-               "--output", str(out.resolve()), "--run-id", run_id,
-               "--max-wall-seconds", str(int(BATCH_TIMEOUT))]
-        started = time.monotonic()
-        with VramSampler() as vram:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=BATCH_TIMEOUT + 120)
-        facts = {"engine": self.name, "exit": result.returncode, "wall_seconds": time.monotonic() - started,
-                 "vram": vram.summary(), "cli_tail": (result.stdout + result.stderr)[-1500:]}
-        out.mkdir(parents=True, exist_ok=True)
-        (out / "vram.json").write_text(json.dumps({"samples": vram.samples, **facts["vram"]}))
-        if not (out / "batch.json").is_file():
-            raise InfraError(f"CARLA batch exited {result.returncode} without batch.json: {facts['cli_tail']}")
-        facts["simulator"] = json.loads((out / "batch.json").read_text()).get("simulator")
-        return facts
+
+def carla_engine() -> CommandEngine:
+    if shutil.which(CANDACE) is None and not Path(CANDACE).is_file():
+        raise InfraError(f"candace CLI not found ({CANDACE}); set RRSI_SIM_CANDACE")
+    return CommandEngine("carla", [CANDACE, "csf", "simulator", "run", "carla",
+                                   "--max-wall-seconds", str(int(BATCH_TIMEOUT))], sample_vram=True)
 
 
 def get(name: str | None = None) -> Engine:
     name = (name or ENGINE).strip().lower()
-    engines = {"fake": FakeEngine, "cpu": CpuEngine, "carla": CarlaEngine}
-    if name not in engines:
-        raise SystemExit(f"unknown RRSI_SIM_ENGINE {name!r}; expected one of {sorted(engines)}")
-    return engines[name]()
+    if name == "fake":
+        return FakeEngine()
+    if name == "command":
+        return CommandEngine("command", shlex.split(os.environ.get("RRSI_SIM_ENGINE_COMMAND", "")))
+    if name == "cpu":
+        return cpu_engine()
+    if name == "carla":
+        return carla_engine()
+    raise SystemExit(f"unknown RRSI_SIM_ENGINE {name!r}; expected fake, command, cpu or carla")
 
 
 def surrogate_name() -> str:

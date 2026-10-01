@@ -20,7 +20,7 @@ container.
 
 | Piece | What it is | Where |
 |---|---|---|
-| Tasks | 8 practice + 4 held-out straight-path scenarios: CSF `Scenario` JSON (seeded target speed 7-14 m/s, 12-20 s, start offset up to 1.2 m, heading up to 0.08 rad) plus a goal distance | `data/scenarios.py` |
+| Tasks | 24 practice + 8 held-out straight-path scenarios: CSF `Scenario` JSON (seeded target speed 5-18 m/s, 10-24 s, start offset up to 1.6 m in a 2 m half-lane, heading up to 0.15 rad) plus a goal distance | `data/scenarios.py` |
 | Agent | frozen policy LLM + the evolvable harness H_0 (a JSON-action loop with a CSF `check` tool; a `rollout` tool on a cheap surrogate plant is passed in but unused by H_0) | `harness/` |
 | Check | CSF's bounded controller compiler (the Go runtime, reading JSON lines on stdin) | `bench/engines.py` |
 | Execute | one CSF scenario batch per evaluation: `fake` (in process), `cpu` (HighwayEnv through CSF's scenario worker), `carla` (CARLA 0.9.16 in its pinned container via `candace csf simulator run carla`) | `bench/engines.py` |
@@ -39,19 +39,28 @@ scenario projector's execution blockers).
 
 ## Engines
 
+The domain only sees an engine interface: submit a batch of episodes
+(scenario + controller + goal), get one result directory per episode
+(`manifest.json` with completed / rejected / infra, `events.jsonl`,
+`trace.jsonl`). `bench/engines.py` documents the contract. Anything that
+honours it can be an engine, so the domain can later target another controller
+host (for example a ROS-side controller) or a direct simulator container
+without changing.
+
 ```bash
 export RRSI_SIM_ENGINE=fake        # no dependencies; CI and plumbing only
-export RRSI_SIM_ENGINE=cpu         # CSF CPU harness, no GPU
+export RRSI_SIM_ENGINE=command     # any executable honouring the contract:
+export RRSI_SIM_ENGINE_COMMAND="/path/to/engine --flag"   # gets --jobs/--output/--run-id appended
+export RRSI_SIM_ENGINE=cpu         # preset: CSF's scenario worker on the CPU HighwayEnv plant
 export RRSI_SIM_CSF_ROOT=/path/to/candace/csf
-export RRSI_SIM_CSF_RUNTIME=/path/to/csf   # Go runtime binary (JSONL mode)
-export RRSI_SIM_ENGINE=carla       # needs the GPU to itself
+export RRSI_SIM_CSF_RUNTIME=/path/to/csf   # CSF Go runtime binary (reads JSON lines)
+export RRSI_SIM_ENGINE=carla       # preset: the same worker in CARLA 0.9.16; needs the GPU to itself
 export RRSI_SIM_CANDACE=/path/to/candace-server/server_admin_scripts/candace-cli/candace
 ```
 
-`candace csf simulator build carla` builds the worker image first. The
-`rollout` tool uses `RRSI_SIM_SURROGATE` (default: `cpu` when grading on CARLA
-and the CPU engine is configured, otherwise `fake`). Smoke tests run on the
-surrogate.
+The `rollout` tool uses `RRSI_SIM_SURROGATE` (default: `cpu` when grading on
+CARLA and the CPU engine is configured, otherwise `fake`). Smoke tests run on
+the surrogate.
 
 ## Models
 

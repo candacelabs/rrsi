@@ -18,7 +18,7 @@ systems, in developer preview and not yet publicly released; this domain uses
 its scenario and controller messages, its bounded controller compiler and
 runtime, and its simulator workers (README.md says more).
 
-Tasks are scenarios, not commits: 8 practice (evolve) and 4 held-out
+Tasks are scenarios, not commits: 24 practice (evolve) and 8 held-out
 straight-path scenarios (data/scenarios.py). The agent (frozen policy +
 evolvable harness) proposes one controller per scenario; CSF checks it with its
 bounded controller compiler, executes it on the selected engine (fake, CPU

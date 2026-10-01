@@ -1,7 +1,7 @@
 {
- "_doc": "Simulation instance: 8 practice straight-path driving scenarios, 4 held out. Reward = fraction of 4 oracles passed per episode; S = mean reward over 8 x k trials. Cost per trial = policy tokens + sim_second_tokens x simulated seconds. delta is null so `calibrate` estimates it from repeated base evaluations. Engine: RRSI_SIM_ENGINE (fake | cpu | carla).",
+ "_doc": "Simulation instance: 24 practice straight-path driving scenarios, 8 held out. Reward = fraction of 4 oracles passed per episode; S = mean reward over 24 x k trials. Cost per trial = policy tokens + sim_second_tokens x simulated seconds. delta is null so `calibrate` estimates it from repeated base evaluations. Engine: RRSI_SIM_ENGINE (fake | cpu | carla).",
  "T": 1,
- "k": 2,
+ "k": 3,
  "m": 2,
  "b_min": 1,
  "b_max": 2,
