@@ -68,6 +68,7 @@
 > | `toy` domain | 30 small Python tasks with hidden tests, a deliberately weak harness, a network-less container sandbox — the cheapest full RRSI loop | [`domains/toy/`](domains/toy/README.md) |
 > | `rrsi-mine` | Rust: mine commits → validate FAIL_TO_PASS in sealed `golang` containers → fairness stages → `exam.jsonl`; pyo3 bindings (`import rrsi_mine`) for the Python side | [`tools/rrsi-mine/`](tools/rrsi-mine) |
 > | `rrsi-report` | Rust: one self-contained HTML report — plain-language "start here", funnel, why tasks were dropped, timeline, practice-set vs final-exam split with health checks and interpretation, task browser with example cards (the reference fix stays a collapsed spoiler) | [`tools/rrsi-mine/src/bin/rrsi-report.rs`](tools/rrsi-mine/src/bin/rrsi-report.rs) |
+> | Harness miner | Rust `rrsi-mine traces` finds where the agent struggled in Claude Code session transcripts; `python -m rrsi harness mine` clusters recurring struggles into harness tasks and a private report | [`tools/rrsi-mine/src/traces.rs`](tools/rrsi-mine/src/traces.rs), [`rrsi/harness/`](rrsi/harness/mine.py) |
 >
 > **How it works, in one example.** A commit "suppress unsafe notification
 > retries" added a test: *a delivery error that says it is not retryable must be
@@ -100,6 +101,53 @@
 > spread across subsystems), then the `house_go` domain: baseline → noise band
 > → RRSI rounds → final exam. The headline above will be replaced by that
 > result.
+>
+> **Harness miner: learn from the sessions themselves.** Where an exam asks
+> "can the agent fix this bug?", the harness miner asks "where did the agent
+> struggle while we actually worked with it, and what harness change would have
+> prevented it?" It reads Claude Code transcripts (`~/.claude/projects`,
+> including subagent transcripts) in two stages:
+>
+> 1. `rrsi-mine traces` (Rust, no LLM) parses every transcript and runs nine
+>    named, unit-tested detectors: `tool_error`, `retry` (the same call again
+>    after it failed), `hook_timeout`, `permission_denial`, `user_interrupt`,
+>    `user_correction` (a short pushback such as "no", "why", "again" or
+>    shouting right after an agent action), `reask` (the user asks nearly the
+>    same thing again after an answer), `silence` (the harness told the agent
+>    the user has not heard from it) and `test_failure` (go test, cargo,
+>    pytest, bazel, GitHub Actions). Hits close together become one *episode*
+>    with a bounded, truncated context window. Unchanged transcripts are
+>    skipped by mtime + content hash, so re-runs take seconds.
+> 2. `python -m rrsi harness mine` runs stage 1, then has a model (default:
+>    `claude-opus-5-5` through the Claude Agent SDK on the logged-in Claude
+>    Code, no API key; `--backend copilot|codex` use those logged-in CLIs)
+>    label each episode with a recurring-struggle pattern, merge patterns into
+>    clusters and write one task per top cluster: title, pattern, evidence
+>    (episode ids and counts), root-cause hypothesis, proposed harness fix
+>    (CLAUDE.md rule, skill, house-lint gate rule, memory, tool/CLI fix or
+>    doc), acceptance check and priority, plus RRSI-style exam candidates where
+>    a before/after is mechanically checkable. Every count is computed from
+>    the episode records, never by the model.
+>
+> ```bash
+> python -m rrsi harness mine                  # ~/.claude/projects -> ~/rrsi-private/harness
+> python -m rrsi harness mine --since 2026-09-01 --backend copilot
+> tools/rrsi-mine/target/release/rrsi-mine traces --out DIR   # stage 1 only
+> ```
+>
+> Output: `DIR/episodes.jsonl`, `DIR/tasks/<id>.json` + `index.json`,
+> `DIR/exam_candidates.jsonl`, `DIR/REPORT.md` (the top recurring struggles
+> with episode, session and project counts and the proposed fix).
+>
+> **Privacy rules.** Transcripts hold private source, hostnames, addresses and
+> personal text. Both stages refuse to write inside any git work tree; keep
+> the output (default `~/rrsi-private/harness`) out of every repository. Text
+> sent to a model is redacted first (e-mail and IP addresses, token-like
+> strings, long hex, home paths) and truncated; the SDK backend runs with no
+> tools, no settings and no session persistence, so the miner's own calls
+> never become transcripts it mines. This repository holds only the code and
+> synthetic test fixtures: no transcript text, episode or finding is ever
+> committed here.
 
 Check out our [paper](https://arxiv.org/abs/2609.24972) and [project page](https://regularized-rsi.com/) for more details.
 
