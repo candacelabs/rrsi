@@ -32,6 +32,7 @@ register! {
     git_history => GitHistory,
     traces => Traces,
     handoffs => Handoffs,
+    slices => Slices,
 }
 
 pub fn find(name: &str) -> Option<&'static dyn Miner> {

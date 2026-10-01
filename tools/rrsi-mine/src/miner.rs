@@ -168,7 +168,7 @@ mod tests {
     #[test]
     fn every_registered_miner_is_findable_and_described() {
         let names: Vec<_> = crate::miners::registry().iter().map(|m| m.name()).collect();
-        assert_eq!(names, ["git-history", "traces", "handoffs"]);
+        assert_eq!(names, ["git-history", "traces", "handoffs", "slices"]);
         for m in crate::miners::registry() {
             let d = describe(*m);
             assert!(d.inputs.iter().any(|[k, _]| *k == "out"), "{} takes --out", d.name);
@@ -179,7 +179,7 @@ mod tests {
 
     #[test]
     fn unknown_miner_and_private_out_are_refused() {
-        assert!(format!("{}", run("nope", json!({})).unwrap_err()).contains("registered: git-history, traces, handoffs"));
+        assert!(format!("{}", run("nope", json!({})).unwrap_err()).contains("registered: git-history, traces, handoffs, slices"));
         let repo = tempfile::tempdir().unwrap();
         std::fs::create_dir(repo.path().join(".git")).unwrap();
         let out = repo.path().join("o");
