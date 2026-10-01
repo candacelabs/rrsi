@@ -238,7 +238,9 @@ def get(name: str | None = None) -> Backend:
 
 
 def surrogate_name() -> str:
-    """The cheaper backend behind the agent's rollout tool; never the graded one."""
+    """The cheaper backend behind the agent's rollout tool. It differs from the
+    graded backend except on `fake`, which is for tests; on `cpu` the fake
+    bicycle is close to the graded HighwayEnv plant (see README)."""
     explicit = os.environ.get("RRSI_SIM_SURROGATE", "").strip().lower()
     if explicit:
         return explicit
