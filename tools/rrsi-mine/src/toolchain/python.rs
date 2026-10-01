@@ -44,12 +44,21 @@ pub fn is_test_module(path: &str) -> bool {
     n.ends_with(".py") && (n.starts_with("test_") || n.ends_with("_test.py"))
 }
 
+/// Documentation and media: never part of a fix.
+pub const DOCS: [&str; 9] = ["md", "rst", "adoc", "png", "jpg", "jpeg", "gif", "svg", "pdf"];
+
+/// pytest suites often check files that are not Python (workflows, shell
+/// scripts, configuration): every changed file outside the tests that is
+/// not documentation is part of the fix.
 pub fn classify_file(path: &str) -> FileKind {
     let n = super::file_name(path);
-    let py = matches!(super::extension(path), "py" | "pyi");
+    let ext = super::extension(path);
+    let py = matches!(ext, "py" | "pyi");
     if !py {
         // Fixtures and data next to the tests travel with the tests.
-        return if in_dir_named(path, &TEST_DIRS) { FileKind::Test } else { FileKind::Other };
+        return if in_dir_named(path, &TEST_DIRS) { FileKind::Test }
+               else if DOCS.contains(&ext) || n == "LICENSE" { FileKind::Other }
+               else { FileKind::Source };
     }
     if n.ends_with("_pb2.py") || n.ends_with("_pb2_grpc.py") || n.ends_with("_pb2.pyi")
         || path.contains("/gen/") || path.contains("_cgen") {
@@ -178,7 +187,12 @@ pub fn classify(exit: i32, log: &str, own: &BTreeSet<String>) -> Outcome {
                 own_missing = true;
                 continue;
             }
-            return Outcome::Infra;
+            // A module object missing an attribute at test time is the
+            // tests' own failure (often a file loaded under a test-chosen
+            // name); only failed imports of other code are infrastructure.
+            if !line.contains("has no attribute") {
+                return Outcome::Infra;
+            }
         }
         if INFRA_MARKERS.iter().any(|m| line.contains(m)) {
             return Outcome::Infra;
@@ -306,7 +320,9 @@ mod tests {
         assert_eq!(classify_file("pkg/api_pb2.py"), FileKind::Generated);
         assert_eq!(classify_file("pkg/api_pb2_grpc.py"), FileKind::Generated);
         assert_eq!(classify_file("README.md"), FileKind::Other);
-        assert_eq!(classify_file("pkg/core.go"), FileKind::Other);
+        assert_eq!(classify_file("docs/diagram.svg"), FileKind::Other);
+        assert_eq!(classify_file(".github/workflows/ci.yml"), FileKind::Source, "a checked workflow is the fix");
+        assert_eq!(classify_file("scripts/release.sh"), FileKind::Source);
         assert!(is_test_module("a/test_x.py") && is_test_module("a/x_test.py"));
         assert!(!is_test_module("tests/helpers.py") && !is_test_module("conftest.py"));
     }
@@ -408,6 +424,24 @@ mod tests {
         assert_eq!(classify(2, NEW_NAME_MISSING, &own(&["other"])), Outcome::Infra);
         // Own-module blame never hides a real third-party failure elsewhere.
         assert_eq!(classify(2, &format!("{NEW_NAME_MISSING}{MISSING_THIRD_PARTY}"), &mine), Outcome::Infra);
+    }
+
+    // Regression, 2026-10-01 (task 58a4f72d3e6c): a test loads a script
+    // under its own module name and calls a function the parent lacks. That
+    // is a failing test, never infrastructure.
+    const LOADED_SCRIPT_ATTRIBUTE: &str = "$ pytest ./tests/test_cli.py\nexit=1\n\
+        ............................................FFFFF.F.............         [100%]\n\
+        >       group = CANDACE.rrsi_commands\n\
+        E     AttributeError: module 'candace_cli_under_test' has no attribute 'rrsi_commands'. \
+        Did you mean: 'ai_commands'?\n\
+        tests/test_cli.py:180: AttributeError\n\
+        =========================== short test summary info ============================\n\
+        FAILED tests/test_cli.py::CandaceCliTests::test_research_rrsi_drives_the_rust_miner_on_this_checkout\n\
+        ========================= 6 failed, 58 passed in 9.12s =========================\n";
+
+    #[test]
+    fn a_missing_attribute_of_a_module_loaded_by_the_tests_is_a_failing_test() {
+        assert_eq!(classify(1, LOADED_SCRIPT_ATTRIBUTE, &own(&["tests", "test_cli"])), Outcome::TestFail);
     }
 
     #[test]

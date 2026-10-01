@@ -379,7 +379,13 @@ impl Run<'_> {
 /// Make the top of named volume `volume` owned by `uid:gid` (named volumes
 /// start root-owned; the toolchain containers run as the tree's owner).
 pub fn own_volume(image: &str, volume: &str, tree: &Path) -> Result<()> {
+    static DONE: std::sync::Mutex<BTreeSet<String>> = std::sync::Mutex::new(BTreeSet::new());
     let (uid, gid) = owner(tree)?;
+    let key = format!("{volume} {uid}:{gid}");
+    let mut done = DONE.lock().unwrap_or_else(|p| p.into_inner());
+    if done.contains(&key) {
+        return Ok(());
+    }
     let out = Command::new("docker")
         .args(["run", "--rm", "--user", "0", "--network", "none", "--entrypoint", "chown",
                "-v", &format!("{volume}:/v"), image, &format!("{uid}:{gid}"), "/v"])
@@ -387,6 +393,7 @@ pub fn own_volume(image: &str, volume: &str, tree: &Path) -> Result<()> {
     if !out.status.success() {
         bail!("chown of volume {volume}: {}", String::from_utf8_lossy(&out.stderr));
     }
+    done.insert(key);
     Ok(())
 }
 
