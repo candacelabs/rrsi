@@ -40,7 +40,11 @@
 > - **Grow the exam automatically.** Re-running the miner only processes new
 >   commits, so every merged fix with a test becomes a new candidate question.
 > - **Mine any CSF-instrumented Go repository with CSF's own architecture and
->   gates.** `rrsi-mine csf detect` says whether a repo uses CSF and why; each
+>   gates.** (CSF is Candace Labs' Go framework for AI-agent systems, not yet
+>   publicly released; a repository is *CSF-instrumented* when it uses the Go
+>   module `github.com/candacelabs/csf` or declares its architecture in an
+>   `architecture.csf` file. See the [definition](tools/rrsi-mine/CSF.md#what-csf-is).)
+>   `rrsi-mine csf detect` says whether a repo uses CSF and why; each
 >   task records which declared components its fix touches (4 of our 70) and
 >   whether the fix passes `csfc check` / `check-generated`, so only gates the
 >   real fix passes are ever required of an agent. See

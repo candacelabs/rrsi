@@ -16,6 +16,18 @@ limitations under the License.
 
 # rrsi-mine on CSF-instrumented repositories
 
+## What CSF is
+
+**CSF** ("Cerebrospinal Fluid") is Candace Labs' Go framework for AI-agent systems: one Go runtime that hosts agent work, typed tools callable over HTTP and MCP, shared knowledge and recorded experiment evidence, plus an architecture compiler (`csfc`) that checks a repository's declared components against its code. It is in developer preview and not yet publicly released.
+
+A repository is **CSF-instrumented** when it does at least one of: requires the
+Go module `github.com/candacelabs/csf` in a `go.mod`, depends on it as `@csf`
+in Bazel, or declares its architecture in an `architecture.csf` file. Every
+other Go repository still works with rrsi-mine; it just gets none of the
+CSF-specific features below.
+
+## How rrsi-mine uses it
+
 CSF (the Go module `github.com/candacelabs/csf`) lets a
 Go repository declare its architecture in an `architecture.csf` file: its
 components (`service`, `manager`, `library`, `adapter`, `gateway`,
