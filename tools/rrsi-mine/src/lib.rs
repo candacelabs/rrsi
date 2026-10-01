@@ -380,15 +380,15 @@ pub fn validate(repo: &Path, out: &Path, cand: &Candidate, tc: &dyn Toolchain) -
         // The units the tests run as, resolved on the commit tree (a CTest
         // name, a Bazel label); Go and Python keep the listed ones.
         let units = tc.resolve_units(&commit, cand)?;
-        if units != cand.packages {
-            println!("[mine]   {short} units: {}", units.join(" "));
-            rec.cand.packages = units;
-        }
-        let cand = &rec.cand.clone();
-        if cand.packages.is_empty() {
+        if units.is_empty() {
             rec.reason = "no test unit runs the changed tests".into();
             rec.detail = infra;
         } else {
+            if units != cand.packages {
+                println!("[mine]   {short} units: {}", units.join(" "));
+                rec.cand.packages = units;
+            }
+            let cand = &rec.cand.clone();
             println!("[mine]   {short} parent: {}", tc.test_label(&cand.packages));
             let (parent_out, parent_log) = tc.run_tests(&parent, cand)?;
             println!("[mine]   {short} parent: {parent_out:?}");

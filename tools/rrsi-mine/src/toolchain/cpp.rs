@@ -17,9 +17,10 @@
 //! The project root is the outermost directory holding a `CMakeLists.txt`
 //! (the top-level project owns the CTest tree). The networked prefetch
 //! configures the tree into a build directory beside it (FetchContent and
-//! friends download then) and asks CMake's file API for the code model and
-//! CTest for its test list. A changed test file maps to the CTest tests
-//! whose executable is built from it. The offline run reconfigures with
+//! friends download then) and asks CMake's file API for the code model; the
+//! generated `CTestTestfile.cmake` files list every test and the executable
+//! it runs. A changed test file maps to the CTest tests whose executable is
+//! built from it. The offline run reconfigures with
 //! `FETCHCONTENT_FULLY_DISCONNECTED=ON`, builds only those executables and
 //! runs `ctest -R '^(name|...)$'`.
 
@@ -102,8 +103,7 @@ const CONFIGURE: &str = "cmake -S \"$SRC\" -B /build -G Ninja -DCMAKE_BUILD_TYPE
 pub fn prefetch_script(cmake_args: &[String]) -> String {
     let extra: Vec<String> = cmake_args.iter().map(|a| sh_quote(a)).collect();
     format!("set -u\nmkdir -p /build/.cmake/api/v1/query && touch /build/.cmake/api/v1/query/codemodel-v2\n\
-             {CONFIGURE} {} || exit 1\n\
-             ctest --test-dir /build --show-only=json-v1 > /build/rrsi-ctest.json || exit 1\n", extra.join(" "))
+             {CONFIGURE} {} || exit 1\n", extra.join(" "))
 }
 
 pub fn test_script(cmake_args: &[String], targets: &[String], tests: &[String]) -> String {
@@ -132,13 +132,31 @@ pub struct CtestTest {
     pub command: Option<String>,
 }
 
-/// The tests of `ctest --show-only=json-v1`.
-pub fn parse_ctest(json: &str) -> Result<Vec<CtestTest>> {
-    let v: Value = serde_json::from_str(json).context("parsing ctest --show-only=json-v1")?;
-    Ok(v["tests"].as_array().map(|a| a.iter().map(|t| CtestTest {
-        name: t["name"].as_str().unwrap_or_default().to_string(),
-        command: t["command"].get(0).and_then(Value::as_str).map(str::to_string),
-    }).collect()).unwrap_or_default())
+/// The tests a generated `CTestTestfile.cmake` declares:
+/// `add_test([=[name]=] "/build/bin/exe" args...)`. (`ctest
+/// --show-only=json-v1` omits the command of a test whose executable is
+/// not built yet, so it cannot map tests before the build.)
+pub fn parse_ctest_testfile(text: &str) -> Vec<CtestTest> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let Some(rest) = line.trim().strip_prefix("add_test(") else { continue };
+        let (name, rest) = if let Some(r) = rest.strip_prefix("[=[") {
+            match r.split_once("]=]") { Some(x) => x, None => continue }
+        } else {
+            match rest.split_once(' ') { Some(x) => x, None => continue }
+        };
+        let command = rest.trim_start().strip_prefix('"').and_then(|r| r.split('"').next()).map(str::to_string);
+        out.push(CtestTest { name: name.to_string(), command });
+    }
+    out
+}
+
+/// Every test declared under the build directory `build`.
+pub fn read_ctest(build: &Path) -> Vec<CtestTest> {
+    ignore::WalkBuilder::new(build).hidden(false).ignore(false).git_ignore(false).build().flatten()
+        .filter(|e| e.file_name() == "CTestTestfile.cmake")
+        .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+        .flat_map(|t| parse_ctest_testfile(&t)).collect()
 }
 
 /// One CMake target from the file API: its name, artifact paths and source
@@ -283,9 +301,7 @@ impl Cpp {
 
     fn model(tree: &Path) -> Result<(Vec<Target>, Vec<CtestTest>)> {
         let build = build_dir(tree);
-        let tests = parse_ctest(&std::fs::read_to_string(build.join("rrsi-ctest.json"))
-            .context("rrsi-ctest.json: the tree was never configured")?)?;
-        Ok((read_codemodel(&build)?, tests))
+        Ok((read_codemodel(&build)?, read_ctest(&build)))
     }
 }
 
@@ -380,11 +396,16 @@ mod tests {
 
     #[test]
     fn ctest_tests_map_to_the_executables_built_from_changed_sources() {
-        let ctest = r#"{"kind":"ctestInfo","version":{"major":1,"minor":0},"tests":[
-            {"name":"format-test","command":["/build/bin/format-test"]},
-            {"name":"os-test","command":["/build/bin/os-test","--gtest"]},
-            {"name":"lint","command":["/usr/bin/sh","-c","true"]}]}"#;
-        let tests = parse_ctest(ctest).unwrap();
+        // A real CMake 3.28 CTestTestfile.cmake, before anything is built.
+        let file = "# CMake generated Testfile for\n\
+            add_test([=[format-test]=] \"/build/bin/format-test\")\n\
+            set_tests_properties([=[format-test]=] PROPERTIES  _BACKTRACE_TRIPLES \"/src/test/CMakeLists.txt;40;add_test\")\n\
+            add_test([=[os-test]=] \"/build/bin/os-test\" \"--gtest\")\n\
+            add_test(lint \"/usr/bin/sh\" \"-c\" \"true\")\n\
+            subdirs(\"gtest\")\n";
+        let tests = parse_ctest_testfile(file);
+        assert_eq!(tests.len(), 3);
+        assert_eq!(tests[2], CtestTest { name: "lint".into(), command: Some("/usr/bin/sh".into()) });
         assert_eq!(tests[1], CtestTest { name: "os-test".into(), command: Some("/build/bin/os-test".into()) });
         let targets = vec![
             Target { name: "format-test".into(), artifacts: vec!["bin/format-test".into()],
@@ -421,7 +442,7 @@ mod tests {
         assert!(s.contains("-DFETCHCONTENT_FULLY_DISCONNECTED=ON '-DFMT_TEST=ON'"), "{s}");
         assert!(s.contains("cmake --build /build --target 'format-test'"), "{s}");
         assert!(s.contains("--no-tests=error -R '^(format-test|a\\.b)$'"), "{s}");
-        assert!(prefetch_script(&[]).contains("codemodel-v2") && prefetch_script(&[]).contains("json-v1"));
+        assert!(prefetch_script(&[]).contains("codemodel-v2"));
     }
 
     // Regression pins: real GCC / CMake / CTest output shapes.
