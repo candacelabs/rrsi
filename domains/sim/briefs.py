@@ -28,6 +28,12 @@ block, and the classes need different mechanisms:
   HARNESS-CRASH: the harness raised; the whole trial is lost.
   INFRA: the policy endpoint or simulator failed; not evidence about the harness."""
 
+_HELDOUT_PHYSICS = """Graded episodes run on held-out physics: each graded vehicle differs from
+the rollout preview in hidden, per-episode ways (tyre and mass properties,
+actuator delay and rate limits, sensing delay, noise and bias), so a preview
+pass does not guarantee a graded pass. Harness code is forbidden to read
+files, environment variables, interpreter internals or grader modules."""
+
 ANALYST = f"""The agent is a small JSON-action loop driving a frozen policy LLM that
 designs a controller (a tiny integer expression tree) for a car on a straight
 road. The controller is checked by CSF, executed in a physics simulator, and
@@ -38,7 +44,9 @@ limit, settled at the end); the reward is the fraction passed.
 
 The agent has a `check` tool (CSF admission) and a `rollout` tool (one episode on
 a cheap surrogate plant, not the graded simulator). Count how often it submits
-without checking or rolling out, and how often it breaks the JSON protocol."""
+without checking or rolling out, and how often it breaks the JSON protocol.
+
+{_HELDOUT_PHYSICS}"""
 
 DIGESTER = """The trajectory comes from a JSON-action agent that designs a driving
 controller (integer expression tree over four normalized inputs) for one
@@ -63,13 +71,17 @@ protocol robust, give the policy a safer way to express a controller, check and
 roll out before submitting, and recover from a loop that never submitted are
 all legitimate. `max_steps` is injected by the runner.
 
+{_HELDOUT_PHYSICS}
+
 {_CLASSES}"""
 
-CRITIC = """Harness under review: a JSON-action agent that designs a driving
+CRITIC = f"""Harness under review: a JSON-action agent that designs a driving
 controller per scenario, graded in a simulator by oracles. Reject any edit
 that names a scenario id or seed, hardcodes per-scenario numbers (target
 speeds, offsets, goal distances) or a lookup from scenario to controller;
 reads the scenario data, the oracle source, the grader or evidence files; or
 uses the network or processes. General control practice (proportional-derivative
 lane keeping, sign conventions from the documented inputs, gain margins,
-clamping, using the rollout tool) is fine."""
+clamping, using the rollout tool) is fine.
+
+{_HELDOUT_PHYSICS}"""

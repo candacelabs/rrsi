@@ -29,6 +29,12 @@ fraction. Cost = policy tokens + `sim_second_tokens` x simulated seconds.
 A simulator or runtime failure is Infra: the trial gets no verdict, is retried
 once, and otherwise counts as missing; it is never scored as the controller's
 failure. Trial i of task X in job J is runs/sim/jobs/J/X/t<i>/.
+
+Each evaluation runs the evaluated commit's runner twice: `--phase propose`
+(policy and harness, in an environment without RRSI_SIM_PHYS_* variables)
+and then `--phase grade` (simulator backend and oracles, no harness). On the
+held-out-physics backend (`phys`) the harness therefore never shares a
+process with the grader or sees where the salt is (README "Held-out physics").
 """
 
 from __future__ import annotations
@@ -69,6 +75,19 @@ class SimDomain(Domain):
          "scenario id or seed hardcoded in the scaffold"),
         (r"urllib|requests\.|socket\.|http://|https://|pip install|subprocess|os\.system",
          "network, package install or process escape from the harness"),
+        # Held-out physics: the harness runs in process as the same user, so
+        # reading the grader, its salt, the environment, files or interpreter
+        # internals is forbidden here rather than prevented. Every alternative
+        # is code-shaped: prose such as "surrogate plant" or "the oracles"
+        # must stay legal, and a precheck hit is a hard reject.
+        (r"heldout_vehicle|heldout_physics|phys_worker|\bgrader/|(?:import|from)\s+grader\b|fake_backend|"
+         r"(?:import|from)\s+(?:oracles|scenarios|backends|run_tasks|briefs|render)\b|"
+         r"\b(?:oracles|backends)\.[A-Za-z_]|"
+         r"RRSI_SIM_|salt_file|salt_id|\bhmac\b|os\.environ|getenv|/proc/|\bopen\(|read_text|read_bytes|\bPath\(|"
+         r"pathlib|\bglob\b|os\.(?:walk|listdir|scandir)|importlib|__import__|sys\.(?:modules|path)|__closure__|"
+         r"__globals__|__code__|\binspect\.|import\s+inspect|\bgc\.|_getframe|\bthreading\b|multiprocessing|"
+         r"ctypes|pickle",
+         "reads the grader, its hidden physics or salt, the environment, files or interpreter internals"),
     ]
     component_signals = [
         ("output_plumbing", [r"_parse\(", r"json\.loads", r"fence", r"```"]),
@@ -105,16 +124,34 @@ class SimDomain(Domain):
 
     def run(self, root, runs_dir, job, ids, k, log_prefix="", backend=None):
         root, runs_dir = Path(root), Path(runs_dir)
+        if (backend or os.environ.get("RRSI_SIM_BACKEND", "fake")).strip().lower() == "phys":
+            # Refuse before any policy call: without the salt every graded
+            # episode would be infra.
+            sys.path.insert(0, str(HERE / "bench"))
+            import backends
+            problem = backends.salt_problem(os.environ.get("RRSI_SIM_PHYS_SALT_FILE", ""))
+            if problem:
+                raise SystemExit(f"phys simulator backend: {problem}")
         log = runs_dir / "logs" / f"{log_prefix or job}.log"
         log.parent.mkdir(parents=True, exist_ok=True)
+        agent_env = {name: value for name, value in os.environ.items() if not name.startswith("RRSI_SIM_PHYS_")}
         # A policy-endpoint failure or a simulator crash leaves a trial without
         # a verdict; one retry pass fills them before scoring counts them missing.
         for _ in range(2):
-            with open(log, "a") as lf:
-                r = subprocess.run(self._cmd(root, runs_dir, job, ids, k, backend),
-                                   cwd=str(root / "domains" / "sim"), stdout=lf, stderr=subprocess.STDOUT)
-            if r.returncode != 0:
-                print(f"[sim] WARNING run rc={r.returncode} (see {log})", flush=True)
+            for phase, env in (("propose", agent_env), ("grade", None)):
+                start = log.stat().st_size if log.is_file() else 0
+                with open(log, "a") as lf:
+                    r = subprocess.run(self._cmd(root, runs_dir, job, ids, k, backend) + ["--phase", phase],
+                                       cwd=str(root / "domains" / "sim"), stdout=lf, stderr=subprocess.STDOUT,
+                                       env=env)
+                if r.returncode != 0:
+                    print(f"[sim] WARNING {phase} rc={r.returncode} (see {log})", flush=True)
+                    with open(log, "rb") as lf:
+                        lf.seek(start)
+                        if b"unrecognized arguments: --phase" in lf.read():
+                            raise SystemExit(
+                                "the evaluated commit's runner predates the propose/grade split; evaluate its "
+                                "harness overlaid on the current grader commit instead (README \"Held-out physics\")")
             if all((runs_dir / "jobs" / job / t / f"t{i}" / "verdict.json").is_file()
                    for t in ids for i in range(k)):
                 break

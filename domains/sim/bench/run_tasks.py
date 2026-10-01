@@ -23,10 +23,17 @@ Trial i of task X is RUNS/jobs/JOB/X/t<i>/:
   verdict.json           oracles, reward, simulated seconds
   receipt.json           hashes binding scenario, controller and evidence
 
-Three resume-safe phases: propose (the policy writes a controller), execute
+Three resume-safe steps: propose (the policy writes a controller), execute
 (one backend batch for every proposed trial still without evidence) and grade.
 A policy-endpoint failure or a simulator crash leaves the trial without a
 verdict, recorded as infra, and the next invocation retries it.
+
+`--phase propose` runs only the agent (policy, harness, rollout preview) and
+never constructs the graded backend; `--phase grade` runs only execute and
+grade, with no policy and no harness import. The adapter runs them as two
+processes and gives the propose process no RRSI_SIM_PHYS_* variable, so the
+harness never runs in the process that grades. `--phase all` (the default)
+does both in one process, for tests and manual runs.
 """
 
 from __future__ import annotations
@@ -51,11 +58,24 @@ sys.path.insert(0, str(SIM / "data"))
 
 import backends                       # noqa: E402
 import oracles                       # noqa: E402
-from harness.agent import run_agent  # noqa: E402
 from scenarios import BY_ID, brief   # noqa: E402
 
 MAX_STEPS = int(os.environ.get("RRSI_SIM_MAX_STEPS", "6"))
 CONCURRENCY = int(os.environ.get("RRSI_SIM_CONCURRENCY", "4"))
+
+
+def _load_harness():
+    """The evolvable agent, imported only by the propose phase."""
+    from harness.agent import run_agent
+    return run_agent
+
+
+def _scrub(tdir: Path) -> None:
+    """Evidence cannot exist before the grade phase; remove anything the
+    agent left where the grader writes."""
+    for name in ("verdict.json", "receipt.json"):
+        (tdir / name).unlink(missing_ok=True)
+    shutil.rmtree(tdir / "episode", ignore_errors=True)
 
 
 def _load_policy():
@@ -110,7 +130,7 @@ def make_tools(task: dict, surrogate: backends.Backend, scratch: Path):
     return check, rollout
 
 
-def propose(runs: Path, job: str, tid: str, i: int, policy, surrogate) -> str:
+def propose(runs: Path, job: str, tid: str, i: int, policy, surrogate, run_agent=None) -> str:
     tdir = runs / "jobs" / job / tid / f"t{i}"
     meta = read(tdir / "meta.json")
     if meta and meta.get("status") in ("ok", "crash"):
@@ -118,6 +138,7 @@ def propose(runs: Path, job: str, tid: str, i: int, policy, surrogate) -> str:
     tdir.mkdir(parents=True, exist_ok=True)
     task = BY_ID[tid]
     check, rollout = make_tools(task, surrogate, tdir / "rollouts")
+    run_agent = run_agent or _load_harness()
     t0 = time.time()
     meta = {"task": tid, "trial": i, "max_steps": MAX_STEPS, "model": policy.MODEL}
     try:
@@ -127,12 +148,14 @@ def propose(runs: Path, job: str, tid: str, i: int, policy, surrogate) -> str:
         meta.update(status="ok", tokens=int(out.get("tokens") or 0),
                     steps=sum(1 for m in msgs if m.get("role") == "assistant"))
     except (policy.PolicyError, backends.InfraError) as e:
+        _scrub(tdir)
         meta.update(status="infra", error=str(e)[:500], seconds=round(time.time() - t0, 1))
         write(tdir / "meta.json", meta)
         return "infra"
     except Exception:  # noqa: BLE001 - a harness crash is the harness's failure
         controller, msgs = None, []
         meta.update(status="crash", error=traceback.format_exc()[-2000:], tokens=0, steps=0)
+    _scrub(tdir)
     meta["seconds"] = round(time.time() - t0, 1)
     write(tdir / "traj.json", {"messages": msgs})
     if controller is not None:
@@ -205,32 +228,52 @@ def grade_trial(tdir: Path, task: dict, backend_name: str) -> str:
     return "passed" if verdict.get("reward") == 1.0 else "graded"
 
 
+def propose_all(runs: Path, job: str, work: list[tuple[str, int]]) -> dict:
+    """The agent's phase: policy, harness and rollout preview only."""
+    surrogate = backends.get(backends.surrogate_name())
+    policy = _load_policy()
+    run_agent = _load_harness()
+    with ThreadPoolExecutor(max_workers=CONCURRENCY) as ex:
+        proposed = list(ex.map(lambda w: propose(runs, job, *w, policy, surrogate, run_agent), work))
+    return {k: proposed.count(k) for k in sorted(set(proposed))}
+
+
+def grade_all(runs: Path, job: str, work: list[tuple[str, int]], backend: backends.Backend) -> str:
+    """The grader's phase: execute and grade, with no policy and no harness."""
+    pending = [(t, i) for t, i in work
+               if (runs / "jobs" / job / t / f"t{i}" / "controller.json").is_file()
+               and (read(runs / "jobs" / job / t / f"t{i}" / "meta.json") or {}).get("status") == "ok"
+               and not (runs / "jobs" / job / t / f"t{i}" / "verdict.json").is_file()
+               and not (runs / "jobs" / job / t / f"t{i}" / "episode" / "manifest.json").is_file()]
+    facts = execute(runs, job, pending, backend)
+    graded = [grade_trial(runs / "jobs" / job / t / f"t{i}", BY_ID[t], backend.name) for t, i in work]
+    counts = {k: graded.count(k) for k in sorted(set(graded))}
+    return (f"backend={backend.name} executed={len(pending)} grades={counts} batch={facts.get('batch', '-')} "
+            f"vram={facts.get('vram', {}).get('peak_mib', '-')}")
+
+
 def main() -> int:
+    # backends captured the salt path at import; harness code never finds it
+    # in this process's environment.
+    os.environ.pop("RRSI_SIM_PHYS_SALT_FILE", None)
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", required=True)
     ap.add_argument("--job", required=True)
     ap.add_argument("--ids", required=True)
     ap.add_argument("--n", type=int, required=True)
     ap.add_argument("--backend", default=None, help="override RRSI_SIM_BACKEND (smoke uses the surrogate)")
+    ap.add_argument("--phase", choices=("propose", "grade", "all"), default="all")
     a = ap.parse_args()
     runs = Path(a.runs)
     work = [(t, i) for t in a.ids.split(",") if t for i in range(a.n)]
-    backend = backends.get(a.backend)
-    surrogate = backends.get(backends.surrogate_name())
-    policy = _load_policy()
-    with ThreadPoolExecutor(max_workers=CONCURRENCY) as ex:
-        proposed = list(ex.map(lambda w: propose(runs, a.job, *w, policy, surrogate), work))
-    pending = [(t, i) for t, i in work
-               if (runs / "jobs" / a.job / t / f"t{i}" / "controller.json").is_file()
-               and (read(runs / "jobs" / a.job / t / f"t{i}" / "meta.json") or {}).get("status") == "ok"
-               and not (runs / "jobs" / a.job / t / f"t{i}" / "verdict.json").is_file()
-               and not (runs / "jobs" / a.job / t / f"t{i}" / "episode" / "manifest.json").is_file()]
-    facts = execute(runs, a.job, pending, backend)
-    graded = [grade_trial(runs / "jobs" / a.job / t / f"t{i}", BY_ID[t], backend.name) for t, i in work]
-    counts = {k: graded.count(k) for k in sorted(set(graded))}
-    print(f"[sim] job={a.job} backend={backend.name} proposals={ {k: proposed.count(k) for k in sorted(set(proposed))} } "
-          f"executed={len(pending)} grades={counts} batch={facts.get('batch', '-')} "
-          f"vram={facts.get('vram', {}).get('peak_mib', '-')}", flush=True)
+    # A misconfigured graded backend fails before any policy call.
+    backend = backends.get(a.backend) if a.phase in ("grade", "all") else None
+    line = f"[sim] job={a.job} phase={a.phase}"
+    if a.phase in ("propose", "all"):
+        line += f" proposals={propose_all(runs, a.job, work)}"
+    if backend is not None:
+        line += " " + grade_all(runs, a.job, work, backend)
+    print(line, flush=True)
     return 0
 
 

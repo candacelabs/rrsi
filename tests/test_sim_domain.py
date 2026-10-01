@@ -20,12 +20,15 @@ CSF Go runtime, the fake controller semantics are also compared with it.
 """
 
 import hashlib
+import http.server
 import json
 import math
 import os
 import random
+import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -46,6 +49,7 @@ for _name in _SAVED:
     del sys.modules[_name]
 _PATH, _MODULES = list(sys.path), set(sys.modules)
 sys.path[:0] = [str(SIM), str(SIM / "bench"), str(SIM / "data"), str(SIM / "grader")]
+import agreement                     # noqa: E402
 import backends                      # noqa: E402
 import fake_backend                  # noqa: E402
 import heldout_physics               # noqa: E402
@@ -228,7 +232,7 @@ def run_job(tmp_path, ids, k, policy, backend, job="j"):
     surrogate = backends.FakeBackend()
     work = [(t, i) for t in ids for i in range(k)]
     for t, i in work:
-        run_tasks.propose(runs, job, t, i, policy, surrogate)
+        run_tasks.propose(runs, job, t, i, policy, surrogate, run_agent)
     pending = [(t, i) for t, i in work
                if (runs / "jobs" / job / t / f"t{i}" / "controller.json").is_file()
                and not (runs / "jobs" / job / t / f"t{i}" / "episode" / "manifest.json").is_file()]
@@ -314,6 +318,22 @@ def test_critic_denylist_flags_seeds_and_grader_access():
     for innocent in ("gain = -250  # proportional term",
                      "use about -300 to -600 on input 0 and 100 to 120 on input 2"):
         assert not any(re.search(p, innocent) for p, _ in dom.critic_patterns), innocent
+    # Held-out physics: the harness runs in process, so reaching for the
+    # grader, the salt, the environment, files or interpreter internals is
+    # forbidden by the critic (not prevented by the runtime).
+    hidden, _ = dom.critic_patterns[-1]
+    for text in ('os.environ["RRSI_SIM_PHYS_SALT_FILE"]', "open(p).read()", "import heldout_physics",
+                 "from grader import phys_worker", "rollout.__closure__", "import oracles", "oracles.grade = f",
+                 'backends.get("phys")', "import inspect", 'sys.modules["x"]', "Path(p).read_text()",
+                 "threading.Thread(target=f)", "os.getenv('HOME')", "import importlib", "fake_backend.Bicycle"):
+        assert re.search(hidden, text), text
+    prose = ("Surrogate rollout: ... If any oracle failed or the car left the lane, fix the gains/signs and "
+             "submit again", "Submit only if all oracles pass and the car ends centred",
+             "inspect the rollout verdict before submitting", "checked by the grader.",
+             "the car may respond late; prefer moderate gains")
+    h0 = [p.read_text() for p in sorted((SIM / "harness").glob("*.py"))]
+    for innocent in (*prose, *h0):
+        assert not re.search(hidden, innocent), innocent[:80]
 
 
 @pytest.mark.skipif(not os.environ.get("RRSI_SIM_CSF_RUNTIME"), reason="needs the CSF Go runtime")
@@ -526,3 +546,134 @@ def test_phys_go_runtime_matches_the_mirror(tmp_path, monkeypatch):
         assert (a / "trace.jsonl").read_bytes() == (b / "trace.jsonl").read_bytes()
         manifest = json.loads((b / "manifest.json").read_text())
         assert manifest["simulator"]["controller_runtime"] == "csf-go" and manifest["controller_hash"]
+
+
+PROBE_HARNESS = """import importlib.util, json, os, sys
+
+
+def run_agent(brief, chat, check, rollout, max_steps):
+    text, tokens = chat([{"role": "system", "content": "probe"}, {"role": "user", "content": brief}])
+    seen = {"phys_env": sorted(k for k in os.environ if k.startswith("RRSI_SIM_PHYS_")),
+            "grader_importable": [m for m in ("heldout_physics", "heldout_vehicle", "phys_worker")
+                                  if importlib.util.find_spec(m) is not None],
+            "grader_loaded": [m for m in ("heldout_physics", "heldout_vehicle", "phys_worker")
+                              if m in sys.modules],
+            "salt_in_backends": getattr(sys.modules.get("backends"), "_PHYS_SALT_FILE", None),
+            "preview": rollout(json.loads(text)["controller"]).get("backend")}
+    return {"controller": json.loads(text)["controller"], "tokens": tokens,
+            "messages": [{"role": "assistant", "content": json.dumps(seen)}]}
+"""
+
+
+def policy_server(reply):
+    calls = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            calls.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+            data = json.dumps({"choices": [{"message": {"content": reply}}], "usage": {"total_tokens": 50}})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(data.encode())
+
+        def log_message(self, *a):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, calls
+
+
+def checkout_copy(tmp_path, harness=PROBE_HARNESS):
+    """A worktree-shaped copy (the runner checks out the evaluated commit)."""
+    root = tmp_path / "wt"
+    ignore = shutil.ignore_patterns("__pycache__")
+    shutil.copytree(SIM, root / "domains" / "sim", ignore=ignore)
+    shutil.copytree(ROOT / "rrsi", root / "rrsi", ignore=ignore)
+    (root / "domains" / "toy").mkdir()
+    shutil.copy(ROOT / "domains" / "toy" / "policy.py", root / "domains" / "toy" / "policy.py")
+    (root / "domains" / "sim" / "harness" / "agent.py").write_text(harness)
+    return root
+
+
+def test_the_agent_never_shares_a_process_with_the_phys_grader(tmp_path, monkeypatch):
+    root = checkout_copy(tmp_path)
+    server, calls = policy_server(submit(REFERENCE))
+    path = salt_file(tmp_path)
+    try:
+        monkeypatch.setenv("RRSI_POLICY_BACKEND", "openai")
+        monkeypatch.setenv("RRSI_POLICY_MODEL", "scripted")
+        monkeypatch.setenv("RRSI_POLICY_BASE_URL", f"http://127.0.0.1:{server.server_port}/v1")
+        monkeypatch.setenv("RRSI_SIM_BACKEND", "phys")
+        monkeypatch.setenv("RRSI_SIM_PHYS_SALT_FILE", str(path))
+        monkeypatch.delenv("RRSI_SIM_SURROGATE", raising=False)
+        dom = load_domain("sim")
+        ids = scenarios.EVOLVE[:2]
+        dom.run(root, tmp_path / "runs", "j", ids, 1)
+        assert len(calls) == 2
+        for t in ids:
+            tdir = tmp_path / "runs" / "jobs" / "j" / t / "t0"
+            seen = json.loads(json.loads((tdir / "traj.json").read_text())["messages"][0]["content"])
+            assert seen == {"phys_env": [], "grader_importable": [], "grader_loaded": [],
+                            "salt_in_backends": "", "preview": "fake"}
+            verdict = json.loads((tdir / "verdict.json").read_text())
+            manifest = json.loads((tdir / "episode" / "manifest.json").read_text())
+            assert verdict["backend"] == "phys" and verdict["status"] == "ok"
+            assert manifest["simulator"]["name"] == "phys" and manifest["simulator"]["distribution"] == "physics-v1"
+        # Without a usable salt the evaluation stops before any policy call.
+        monkeypatch.setenv("RRSI_SIM_PHYS_SALT_FILE", str(tmp_path / "absent"))
+        with pytest.raises(SystemExit, match="phys simulator backend"):
+            dom.run(root, tmp_path / "runs", "j2", ids, 1)
+        assert len(calls) == 2
+    finally:
+        server.shutdown()
+
+
+def test_a_runner_without_the_phase_split_fails_loudly(tmp_path, monkeypatch):
+    root = checkout_copy(tmp_path)
+    (root / "domains" / "sim" / "bench" / "run_tasks.py").write_text(
+        "import argparse\nap = argparse.ArgumentParser()\n"
+        "for f in ('--runs', '--job', '--ids', '--n', '--backend'):\n    ap.add_argument(f)\nap.parse_args()\n")
+    monkeypatch.setenv("RRSI_SIM_BACKEND", "fake")
+    with pytest.raises(SystemExit, match="predates the propose/grade split"):
+        load_domain("sim").run(root, tmp_path / "runs", "j", scenarios.EVOLVE[:1], 1)
+
+
+def test_evidence_the_agent_leaves_behind_is_discarded(tmp_path):
+    runs, task = tmp_path / "runs", scenarios.PRACTICE[0]
+    tdir = runs / "jobs" / "j" / task["id"] / "t0"
+
+    def forger(brief, chat, check, rollout, max_steps):
+        (tdir / "verdict.json").write_text(json.dumps({"status": "ok", "reward": 1.0}))
+        (tdir / "episode").mkdir()
+        (tdir / "episode" / "manifest.json").write_text("{}")
+        return {"controller": controller(lateral=400, heading=600), "messages": [], "tokens": 1}
+
+    policy = ScriptedPolicy(lambda brief: submit(controller()))
+    run_tasks.propose(runs, "j", task["id"], 0, policy, backends.FakeBackend(), forger)
+    assert not (tdir / "verdict.json").exists() and not (tdir / "episode").exists()
+    run_tasks.execute(runs, "j", [(task["id"], 0)], backends.FakeBackend())
+    run_tasks.grade_trial(tdir, task, "fake")
+    assert json.loads((tdir / "verdict.json").read_text())["reward"] < 1.0
+
+
+class SerialPool:
+    def map(self, fn, items):
+        return [fn(x) for x in items]
+
+
+def test_agreement_replays_stored_trials_on_preview_and_graded_vehicle(tmp_path):
+    ids = scenarios.EVOLVE[:3]
+    policy = ScriptedPolicy(lambda brief: submit(controller(-1500, -800, 800)))
+    runs, _ = run_job(tmp_path, ids, 2, policy, backends.FakeBackend(), job="stored")
+    agreement._init(FIXTURE_SALT)
+    report, rows = agreement.replay_jobs(SerialPool(), runs, ["stored"])
+    r = report["stored"]
+    assert r["n"] == 6 and r["preview_equals_stored"] == 1.0, "the fake backend is the preview"
+    assert r["preview_S"] == r["stored_S"] and r["graded_S"] is not None
+    assert {(row["task"], row["trial"]) for row in rows} == {(t, i) for t in ids for i in range(2)}
+    expected = graded_reward(ids[0], 1, controller(-1500, -800, 800), tmp=tmp_path / "direct")[0]
+    assert [row["graded"] for row in rows if (row["task"], row["trial"]) == (ids[0], 1)] == [expected]
+    arms = agreement.arms_report(rows, {"A": ["stored"], "B": ["stored"]}, "A")
+    assert arms["B"]["paired_graded_vs_A"]["mean"] == 0.0

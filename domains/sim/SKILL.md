@@ -31,12 +31,19 @@ A candidate replaces the incumbent only if it is admissible:
 1. No scenario-specific content: no scenario ids, seeds, per-scenario numbers
    or a lookup from scenario to controller. Litmus test: would the change help
    on an unseen straight-road scenario with other speeds and offsets?
-2. Never read the scenario data, the oracles, the grader or evidence files; no
-   network, no subprocess, no package installs.
+2. Never read the scenario data, the oracles, the grader (`grader/`, its
+   salt or hidden physics) or evidence files, and never read files,
+   environment variables or interpreter internals at all; no network, no
+   subprocess, no package installs. The harness runs in process, so this is
+   enforced by the critic, not by a sandbox.
 3. Keep the interface: `run_agent(brief, chat, check, rollout, max_steps)`
    returning {"controller", "messages", "tokens"}. `max_steps` is injected.
 4. `rollout` runs a cheap surrogate plant, not the graded simulator. Use it to
    reject unstable or wrong-signed controllers, not to fit numbers exactly.
+   On the held-out-physics backend each graded vehicle differs from the
+   preview in hidden, per-episode ways (tyres, mass, actuator delay and rate
+   limits, sensing delay, noise and bias): a preview pass is not a graded
+   pass.
 5. The harness runs unattended on every scenario: an unhandled exception loses
    the trial. Guard new code paths.
 6. Every edit targets a failure mode visible in the traces. Keep each diff
