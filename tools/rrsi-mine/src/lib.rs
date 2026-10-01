@@ -474,6 +474,7 @@ pub mod llm;
 pub mod scan;
 pub mod miner;
 pub mod miners;
+pub mod transcript;
 
 #[cfg(feature = "python")]
 mod python;

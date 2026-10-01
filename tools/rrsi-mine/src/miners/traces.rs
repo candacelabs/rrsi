@@ -34,6 +34,7 @@
 //! - `DIR/traces-summary.json` — counts per signal, sessions, projects
 
 use crate::enclosing_work_tree;
+pub use crate::transcript::*;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -42,7 +43,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
-use std::time::{Instant, UNIX_EPOCH};
+use std::time::Instant;
 
 /// Hits at most this many events apart belong to one episode.
 pub const EPISODE_GAP: usize = 6;
@@ -142,39 +143,9 @@ impl Signal {
 
 // ---------------------------------------------------------------- parsing
 
-fn s(v: &Value, k: &str) -> String {
-    v.get(k).and_then(Value::as_str).unwrap_or_default().to_string()
-}
 
-/// Text of a message `content` (a string or a list of blocks).
-fn content_text(c: &Value) -> String {
-    match c {
-        Value::String(t) => t.clone(),
-        Value::Array(bs) => bs.iter()
-            .filter_map(|b| b.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>().join("\n"),
-        _ => String::new(),
-    }
-}
 
-/// Removes `<system-reminder>...</system-reminder>` blocks from a user turn.
-pub fn strip_reminders(t: &str) -> String {
-    let mut out = String::new();
-    let mut rest = t;
-    while let Some(a) = rest.find("<system-reminder>") {
-        out.push_str(&rest[..a]);
-        match rest[a..].find("</system-reminder>") {
-            Some(b) => rest = &rest[a + b + "</system-reminder>".len()..],
-            None => { rest = ""; }
-        }
-    }
-    out.push_str(rest);
-    out.trim().to_string()
-}
 
-fn origin_kind(e: &Value) -> Option<String> {
-    e.get("origin").and_then(|o| o.get("kind")).and_then(Value::as_str).map(str::to_string)
-}
 
 /// Parses one transcript (JSON lines; malformed lines are skipped).
 pub fn parse_session<R: BufRead>(r: R) -> Session {
@@ -201,9 +172,9 @@ fn push_human(ses: &mut Session, ts: String, text: String) {
 }
 
 fn parse_event(e: &Value, ses: &mut Session) {
-    let ts = s(e, "timestamp");
+    let ts = field(e, "timestamp");
     if ses.session_id.is_empty() {
-        ses.session_id = s(e, "sessionId");
+        ses.session_id = field(e, "sessionId");
     }
     if ses.agent_id.is_none() {
         ses.agent_id = e.get("agentId").and_then(Value::as_str).map(str::to_string);
@@ -215,13 +186,13 @@ fn parse_event(e: &Value, ses: &mut Session) {
             for b in bs {
                 match b.get("type").and_then(Value::as_str) {
                     Some("text") => {
-                        let text = s(b, "text");
+                        let text = field(b, "text");
                         if !text.trim().is_empty() {
                             ses.events.push(Ev { ts: ts.clone(), kind: EvKind::AssistantText { text } });
                         }
                     }
                     Some("tool_use") => ses.events.push(Ev { ts: ts.clone(), kind: EvKind::ToolUse {
-                        id: s(b, "id"), name: s(b, "name"),
+                        id: field(b, "id"), name: field(b, "name"),
                         input: b.get("input").map(Value::to_string).unwrap_or_default(),
                     }}),
                     _ => {}
@@ -237,7 +208,7 @@ fn parse_event(e: &Value, ses: &mut Session) {
                     if b.get("type").and_then(Value::as_str) == Some("tool_result") {
                         had_result = true;
                         ses.events.push(Ev { ts: ts.clone(), kind: EvKind::ToolResult {
-                            id: s(b, "tool_use_id"),
+                            id: field(b, "tool_use_id"),
                             is_error: b.get("is_error").and_then(Value::as_bool).unwrap_or(false),
                             text: content_text(b.get("content").unwrap_or(&Value::Null)),
                             denial: denial.clone(),
@@ -272,7 +243,7 @@ fn parse_event(e: &Value, ses: &mut Session) {
             match a.get("type").and_then(Value::as_str) {
                 Some("silent_turn_reminder") => ses.events.push(Ev { ts, kind: EvKind::SilenceReminder }),
                 Some("hook_system_message") => {
-                    let text = s(a, "content");
+                    let text = field(a, "content");
                     if text.contains("didn't respond") || text.contains("did not respond") {
                         ses.events.push(Ev { ts, kind: EvKind::HookNoResponse { text } });
                     }
@@ -282,7 +253,7 @@ fn parse_event(e: &Value, ses: &mut Session) {
                         || a.get("humanTurn").and_then(Value::as_bool).unwrap_or(false);
                     if human && a.get("commandMode").and_then(Value::as_str).unwrap_or("prompt") == "prompt" {
                         let ts = a.get("timestamp").and_then(Value::as_str).map(str::to_string).unwrap_or(ts);
-                        push_human(ses, ts, strip_reminders(&s(a, "prompt")));
+                        push_human(ses, ts, strip_reminders(&field(a, "prompt")));
                     }
                 }
                 _ => {}
@@ -349,11 +320,6 @@ pub fn detect_silence(evs: &[Ev]) -> Vec<usize> {
     evs.iter().enumerate().filter_map(|(i, e)| (e.kind == EvKind::SilenceReminder).then_some(i)).collect()
 }
 
-/// Lower-case words (letters, digits, apostrophes).
-pub fn words(t: &str) -> Vec<String> {
-    t.split(|c: char| !(c.is_alphanumeric() || c == '\''))
-        .filter(|w| !w.is_empty()).map(str::to_lowercase).collect()
-}
 
 pub const CORRECTION_WORDS: [&str; 13] = ["no", "nope", "nah", "wtf", "why", "stop", "again", "bruh",
     "wrong", "ugh", "huh", "wait", "undo"];
@@ -403,22 +369,8 @@ pub fn detect_user_correction(evs: &[Ev]) -> Vec<usize> {
     }).collect()
 }
 
-pub const STOPWORDS: [&str; 40] = ["the", "and", "for", "you", "that", "this", "with", "are", "can",
-    "what", "how", "was", "but", "not", "have", "has", "from", "your", "all", "any", "its", "it's",
-    "just", "into", "out", "now", "then", "they", "them", "there", "here", "also", "use", "get",
-    "did", "does", "will", "would", "should", "please"];
 
-/// Content words of a turn: lower-case, 3+ characters, no stopwords.
-pub fn content_words(t: &str) -> BTreeSet<String> {
-    words(t).into_iter().filter(|w| w.chars().count() >= 3 && !STOPWORDS.contains(&w.as_str())).collect()
-}
 
-pub fn jaccard<T: Ord>(a: &BTreeSet<T>, b: &BTreeSet<T>) -> f64 {
-    if a.is_empty() && b.is_empty() {
-        return 1.0;
-    }
-    a.intersection(b).count() as f64 / a.union(b).count() as f64
-}
 
 /// The operator asks (nearly) the same thing again after the agent already
 /// answered it: content-word Jaccard >= [`REASK_JACCARD`] against one of the
@@ -444,14 +396,6 @@ pub fn detect_reask(evs: &[Ev]) -> Vec<usize> {
     hits
 }
 
-/// Character trigrams, for near-identical tool inputs.
-pub fn trigrams(t: &str) -> BTreeSet<String> {
-    let cs: Vec<char> = t.chars().collect();
-    if cs.len() < 3 {
-        return [t.to_string()].into();
-    }
-    cs.windows(3).map(|w| w.iter().collect()).collect()
-}
 
 fn result_of<'a>(evs: &'a [Ev], id: &str) -> Option<&'a EvKind> {
     evs.iter().map(|e| &e.kind).find(|k| matches!(k, EvKind::ToolResult { id: r, .. } if r == id))
@@ -555,19 +499,7 @@ pub struct Episode {
     pub counts: Counts,
 }
 
-/// FNV-1a 64: stable ids and content hashes with no extra dependency.
-pub fn fnv64(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(0xcbf29ce484222325u64, |h, b| (h ^ *b as u64).wrapping_mul(0x100000001b3))
-}
 
-pub fn truncate(t: &str, n: usize) -> String {
-    let t = t.trim();
-    if t.chars().count() <= n {
-        return t.to_string();
-    }
-    let head: String = t.chars().take(n).collect();
-    format!("{head}… [{} chars]", t.chars().count())
-}
 
 fn ctx(evs: &[Ev], i: usize, hits: &BTreeMap<usize, Vec<Signal>>) -> CtxEv {
     let e = &evs[i];
@@ -672,34 +604,8 @@ pub struct Summary {
     pub seconds: f64,
 }
 
-/// Every `*.jsonl` under `root`, as paths relative to it, sorted.
-pub fn transcripts(root: &Path) -> Result<Vec<String>> {
-    fn walk(dir: &Path, root: &Path, out: &mut Vec<String>) -> Result<()> {
-        for ent in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
-            let p = ent?.path();
-            if p.is_dir() {
-                walk(&p, root, out)?;
-            } else if p.extension().is_some_and(|e| e == "jsonl") {
-                out.push(p.strip_prefix(root)?.to_string_lossy().into_owned());
-            }
-        }
-        Ok(())
-    }
-    let mut out = vec![];
-    walk(root, root, &mut out)?;
-    out.sort();
-    Ok(out)
-}
 
-fn file_key(rel: &str) -> String {
-    format!("{:016x}", fnv64(rel.as_bytes()))
-}
 
-fn mtime_size(p: &Path) -> Result<(u64, u64)> {
-    let m = std::fs::metadata(p)?;
-    let t = m.modified()?.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    Ok((t, m.len()))
-}
 
 /// Processes one transcript; returns its new state and writes its episodes.
 fn process(root: &Path, out: &Path, rel: &str, since: &str, prev: Option<&FileState>) -> Result<(FileState, bool)> {
@@ -817,25 +723,7 @@ pub fn mine_traces(root: &Path, out: &Path, since: &str, jobs: usize, exclude: &
     Ok(sum)
 }
 
-/// Seconds since the epoch at the start of an ISO date (YYYY-MM-DD...), UTC.
-pub fn since_epoch(since: &str) -> Option<u64> {
-    let d = since.get(..10)?;
-    let mut it = d.split('-').map(|p| p.parse::<i64>());
-    let (y, m, day) = (it.next()?.ok()?, it.next()?.ok()?, it.next()?.ok()?);
-    // Days from civil (Howard Hinnant).
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let mp = (m + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146097 + doe - 719468;
-    u64::try_from(days * 86400).ok()
-}
 
-pub fn root_default() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".claude/projects")
-}
 
 // ------------------------------------------------------------- plugin
 
