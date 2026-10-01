@@ -30,10 +30,13 @@
 //! `ontology`, the signals the reference fix moved.
 //!
 //! Ontology signals come from an external scorer (`candace ontology score`
-//! in candace-server) given as `--ontology-score`: a shell command run in an
-//! exported tree (`{tree}` is replaced by its quoted path) that prints one
-//! JSON object. Numbers under `signals` (or `counts`) and a top-level `score`
-//! are read; without those keys, every top-level number. It runs on the
+//! in candace-server) given as `--ontology-score`: a shell command run in a
+//! detached checkout (a shared clone, so `git rev-parse HEAD` works; `{tree}`
+//! is replaced by its quoted path) that prints one JSON object. Read are: a
+//! `signals` list of `{"id", "count"}` (a null count is not measured and is
+//! listed under `not_measured`), or numbers under a `signals`/`counts` object,
+//! plus top-level `score` and `penalty`; without those keys, every top-level
+//! number. It runs on the
 //! parent and the commit tree of each valid task; `moved` holds the signals
 //! whose value changed (after − before). Without a scorer, or when it fails,
 //! `ontology.status` says so and why: nothing is guessed.
@@ -50,7 +53,7 @@ use crate::{Candidate, Rejection};
 use anyhow::{bail, Context, Result};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -183,10 +186,11 @@ pub struct SliceTag {
 }
 
 static TITLE_SLICE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)^\s*slice\b[\s:-]*(?:([A-Z]{1,4}\d{1,3}[a-z]?)\b)?").unwrap());
+    LazyLock::new(|| Regex::new(r"^\s*(?i:slice)\b[\s:-]*(?:([A-Z]{1,4}\d{0,3}[a-z]?)(?:\s*:|\s|$))?").unwrap());
 static TITLE_SLICE_TAG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)\(\s*slice\s*:?\s*([^)]+?)\s*\)").unwrap());
 static ID: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[A-Z]{1,4}\d{1,3}[a-z]?$").unwrap());
-static TITLE_ID_PAREN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\(([A-Z]{1,4}\d{1,3}[a-z]?)\)").unwrap());
+static TITLE_ID_PAREN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\(([A-Z]{1,4}\d{1,3}[a-z]?)(?:,[^)]*)?\)").unwrap());
 static TITLE_ID_PREFIX: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*([A-Z]{1,4}\d{1,3}[a-z]?):\s").unwrap());
 static SLICE_HEADING: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?im)^#{1,4}\s*slice\b[^\n]*$").unwrap());
 static PROOF_HEADING: LazyLock<Regex> =
@@ -367,20 +371,41 @@ pub fn select(repo: &Path, rev: &str, since: &str, prs: &[Pr], scanned: (Vec<Can
 /// The numeric signals of one scorer record (see the module docs).
 pub fn signals_of(v: &Value) -> BTreeMap<String, f64> {
     let mut out = BTreeMap::new();
-    let nested = ["signals", "counts"].iter().find_map(|k| v.get(*k).and_then(Value::as_object));
-    let flat: Option<&Map<String, Value>> = if nested.is_some() { None } else { v.as_object() };
-    for (k, x) in nested.or(flat).into_iter().flatten() {
-        let n = x.as_f64().or_else(|| x.get("count").and_then(Value::as_f64));
-        if let Some(n) = n {
-            out.insert(k.clone(), n);
+    let nested = ["signals", "counts"].iter().find_map(|k| v.get(*k)).filter(|x| x.is_object() || x.is_array());
+    let count = |x: &Value| x.as_f64().or_else(|| x.get("count").and_then(Value::as_f64));
+    match nested.or(Some(v)) {
+        // `candace ontology score`: [{"id": "CS-16", "count": 2 | null, ...}]
+        Some(Value::Array(items)) => {
+            for item in items {
+                if let (Some(id), Some(n)) = (item.get("id").and_then(Value::as_str), count(item)) {
+                    out.insert(id.to_string(), n);
+                }
+            }
         }
+        Some(Value::Object(m)) => {
+            for (k, x) in m {
+                if let Some(n) = count(x) {
+                    out.insert(k.clone(), n);
+                }
+            }
+        }
+        _ => {}
     }
     if nested.is_some() {
-        if let Some(s) = v.get("score").and_then(Value::as_f64) {
-            out.insert("score".into(), s);
+        for k in ["score", "penalty"] {
+            if let Some(n) = v.get(k).and_then(Value::as_f64) {
+                out.insert(k.into(), n);
+            }
         }
     }
     out
+}
+
+/// The ids of signals the scorer listed without a count (not measured).
+pub fn unmeasured_of(v: &Value) -> Vec<String> {
+    let Some(Value::Array(items)) = v.get("signals") else { return vec![] };
+    items.iter().filter(|i| i.get("count").is_some_and(Value::is_null))
+        .filter_map(|i| i.get("id").and_then(Value::as_str).map(str::to_string)).collect()
 }
 
 /// Signals whose value differs between `before` and `after` (after − before;
@@ -397,8 +422,8 @@ fn shell_quote(p: &Path) -> String {
     format!("'{}'", p.display().to_string().replace('\'', r"'\''"))
 }
 
-/// Run the scorer `cmd` in `tree` and read its signals.
-pub fn score_tree(cmd: &str, tree: &Path) -> Result<BTreeMap<String, f64>> {
+/// Run the scorer `cmd` in `tree` and return the JSON record it printed.
+pub fn score_tree(cmd: &str, tree: &Path) -> Result<Value> {
     let line = cmd.replace("{tree}", &shell_quote(tree));
     let out = Command::new("sh").arg("-c").arg(&line).current_dir(tree).output()
         .with_context(|| format!("running {line}"))?;
@@ -411,7 +436,20 @@ pub fn score_tree(cmd: &str, tree: &Path) -> Result<BTreeMap<String, f64>> {
     let v = text.lines().rev().find_map(|l| serde_json::from_str::<Value>(l.trim()).ok().filter(Value::is_object))
         .or_else(|| serde_json::from_str::<Value>(text.trim()).ok().filter(Value::is_object))
         .context("the scorer printed no JSON object")?;
-    Ok(signals_of(&v))
+    Ok(v)
+}
+
+/// A detached checkout of `sha` at `<tempdir>/t`: a shared clone (objects
+/// borrowed from `repo`, which is never modified), because a scorer may ask
+/// git for the tree's revision and tracked files.
+pub fn checkout(repo: &Path, sha: &str) -> Result<tempfile::TempDir> {
+    let d = tempfile::Builder::new().prefix("rrsi-slice-").tempdir()?;
+    let t = d.path().join("t");
+    let t = t.to_str().context("temp path")?;
+    let repo = repo.to_str().context("repo path")?;
+    crate::git(d.path(), &["clone", "--quiet", "--shared", "--no-checkout", repo, t])?;
+    crate::git(Path::new(t), &["-c", "advice.detachedHead=false", "checkout", "--quiet", "--detach", sha])?;
+    Ok(d)
 }
 
 /// The `ontology` object for one task: the signals its fix moved.
@@ -423,11 +461,12 @@ pub fn ontology(cmd: Option<&str>, repo: &Path, cand: &Candidate, valid: bool) -
         return json!({"status": "skipped", "reason": "task is not FAIL_TO_PASS valid"});
     }
     let run = || -> Result<Value> {
-        let (parent, commit) = (crate::csf::materialize(repo, &cand.parent)?, crate::csf::materialize(repo, &cand.sha)?);
-        let before = score_tree(cmd, parent.path()).context("parent tree")?;
-        let after = score_tree(cmd, commit.path()).context("commit tree")?;
-        Ok(json!({"status": "measured", "command": cmd, "moved": moved(&before, &after),
-                  "before": before, "after": after}))
+        let (parent, commit) = (checkout(repo, &cand.parent)?, checkout(repo, &cand.sha)?);
+        let before = score_tree(cmd, &parent.path().join("t")).context("parent tree")?;
+        let after = score_tree(cmd, &commit.path().join("t")).context("commit tree")?;
+        let (b, a) = (signals_of(&before), signals_of(&after));
+        Ok(json!({"status": "measured", "command": cmd, "moved": moved(&b, &a), "before": b, "after": a,
+                  "not_measured": unmeasured_of(&after)}))
     };
     run().unwrap_or_else(|e| json!({"status": "error", "command": cmd, "reason": format!("{e:#}")}))
 }

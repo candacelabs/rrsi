@@ -36,6 +36,9 @@ fn slice_titles_name_their_slice() {
         ("db: one pool owner (S4)", "S4", "title_id"),
         ("harness: operating rules (HX1)", "HX1", "title_id"),
         ("N1: retire the old name", "N1", "title_id"),
+        ("runtime: lazily started services (L1, #283)", "L1", "title_id"),
+        ("Slice H: one host app per machine", "H", "title_slice"),
+        ("Slice add the thing", "pr-7", "title_slice"),
     ];
     for (title, id, rule) in cases {
         let (got, ev) = id_of(title, "").unwrap_or_else(|| panic!("{title} is a slice"));
@@ -109,6 +112,14 @@ fn gh_and_snake_case_pr_lists_parse() {
 fn scorer_signals_and_moves() {
     let nested = json!({"score": 4.5, "weights": {"CS-15": 1}, "signals": {"CS-15": 3, "CS-16": {"count": 2}, "note": "x"}});
     assert_eq!(signals_of(&nested), BTreeMap::from([("CS-15".into(), 3.0), ("CS-16".into(), 2.0), ("score".into(), 4.5)]));
+    // The shape `candace ontology score` prints: a list, null = not measured.
+    let listed = json!({"score": 0.25, "penalty": 10, "complete": false, "signals": [
+        {"id": "CS-15", "status": "measured", "count": 4, "weight": 2},
+        {"id": "unlinked-terms", "status": "not_measured", "count": null, "reason": "TODO"}]});
+    assert_eq!(signals_of(&listed),
+               BTreeMap::from([("CS-15".into(), 4.0), ("penalty".into(), 10.0), ("score".into(), 0.25)]));
+    assert_eq!(unmeasured_of(&listed), ["unlinked-terms"]);
+    assert!(unmeasured_of(&nested).is_empty());
     let flat = json!({"CS-17": 1, "label": "x"});
     assert_eq!(signals_of(&flat), BTreeMap::from([("CS-17".into(), 1.0)]));
     let before = BTreeMap::from([("a".to_string(), 3.0), ("b".to_string(), 1.0), ("gone".to_string(), 2.0)]);
@@ -122,7 +133,7 @@ fn the_scorer_runs_in_the_tree_and_its_failures_are_reported() {
     let d = tempfile::tempdir().unwrap();
     std::fs::write(d.path().join("o.json"), r#"{"signals": {"CS-16": 2}, "score": 7}"#).unwrap();
     let got = score_tree("echo scoring >&2; echo 'log line'; cat {tree}/o.json | tr -d '\\n'; echo", d.path()).unwrap();
-    assert_eq!(got, BTreeMap::from([("CS-16".into(), 2.0), ("score".into(), 7.0)]));
+    assert_eq!(signals_of(&got), BTreeMap::from([("CS-16".into(), 2.0), ("score".into(), 7.0)]));
     let err = score_tree("echo boom >&2; exit 3", d.path()).unwrap_err();
     assert!(format!("{err}").contains("exit 3: boom"), "{err}");
     assert!(score_tree("echo not json", d.path()).is_err());
@@ -233,7 +244,8 @@ fn tagging_adds_slice_and_the_ontology_signals_the_fix_moved() {
     let dir = out.path().join(&cand.sha[..12]);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("task.json"), json!({"sha": cand.sha, "valid": true, "reason": "FAIL_TO_PASS"}).to_string()).unwrap();
-    let scorer = "cat ontology.json";
+    // The scorer sees a git checkout of each side, as `candace ontology score` needs.
+    let scorer = "test \"$(git rev-parse HEAD)\" = \"$(git log -1 --format=%H)\" && cat {tree}/ontology.json";
     assert_eq!(tag_task(out.path(), r.path(), cand, tag, Some(scorer)).unwrap(), Some(true));
     let v: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("task.json")).unwrap()).unwrap();
     assert_eq!(v["reason"], "FAIL_TO_PASS", "other fields are kept");
@@ -241,6 +253,10 @@ fn tagging_adds_slice_and_the_ontology_signals_the_fix_moved() {
     assert_eq!(v["slice"]["pr"], 12);
     assert_eq!(v["slice"]["ontology"]["status"], "measured");
     assert_eq!(v["slice"]["ontology"]["moved"], json!({"CS-16": -2.0, "score": -4.0}));
+    assert_eq!(v["slice"]["ontology"]["after"], json!({"CS-16": 1.0, "score": 5.0}));
+    let head = std::process::Command::new("sh").arg("-c").arg("git rev-parse HEAD").current_dir(
+        checkout(r.path(), &cand.sha).unwrap().path().join("t")).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&head.stdout).trim(), cand.sha);
     // A measured ontology survives a re-run without a scorer.
     tag_task(out.path(), r.path(), cand, tag, None).unwrap();
     let v: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("task.json")).unwrap()).unwrap();
