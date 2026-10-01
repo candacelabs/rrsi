@@ -204,10 +204,10 @@
 >
 > **Miners are plugins; write your own.** `rrsi-mine` runs any registered
 > miner: `rrsi-mine miners` lists them (name, inputs, the records each
-> writes) and `rrsi-mine <name> --key value ...` runs one. Four ship today:
-> `git-history` (the FAIL_TO_PASS task miner above), `traces` (the
-> struggle miner), `handoffs` (cross-session coordination) and `pr-gap`
-> (active agents without a PR). A miner is one file in
+> writes) and `rrsi-mine <name> --key value ...` runs one. Five ship today:
+> `git-history` (the FAIL_TO_PASS task miner above), `slices` (FAIL_TO_PASS
+> tasks from merged slice PRs), `traces` (the struggle miner), `handoffs`
+> (cross-session coordination) and `pr-gap` (active agents without a PR). A miner is one file in
 > [`tools/rrsi-mine/src/miners/`](tools/rrsi-mine/src/miners/mod.rs)
 > implementing the [`Miner`](tools/rrsi-mine/src/miner.rs) trait plus one
 > registration line; deleting both removes it. Arguments arrive as a plain
