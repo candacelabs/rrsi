@@ -590,7 +590,7 @@ pub fn episodes(ses: &Session, project: &str, file: &str) -> Vec<Episode> {
 
 /// Bump when [`facts`] changes meaning: every transcript is then re-read
 /// once, however unchanged, so the state never mixes two definitions.
-pub const FACTS_VERSION: u32 = 1;
+pub const FACTS_VERSION: u32 = 2;
 
 /// What one transcript contributes to the struggle-rate measurement: the
 /// denominator (tool calls, bucketed by UTC hour so the measurement can
@@ -602,22 +602,34 @@ pub struct Facts {
     pub version: u32,
     /// `YYYY-MM-DDTHH` (UTC) -> tool calls started in that hour.
     pub tool_calls_by_utc_hour: BTreeMap<String, usize>,
-    /// Tool results saying a host hook did not respond ([`HOOK_TIMEOUT_MARKERS`]).
+    /// Error results whose first line says a host hook did not respond
+    /// ([`HOOK_TIMEOUT_MARKERS`]), plus the host's own no-response notes.
     pub hook_timeouts: usize,
-    /// Tool results rejected by the host's worktree guard ([`GUARD_MARKERS`]).
+    /// Error results whose first line is the host's worktree guard refusing
+    /// the call ([`GUARD_MARKERS`]).
     pub guard_rejections: usize,
 }
 
+/// A host marker is the host's own message opening an error result. A
+/// successful result that merely quotes the phrase (an agent grepping the
+/// mined data, say) is not one; the signals above stay as broad as before.
 pub fn facts(evs: &[Ev]) -> Facts {
     let mut f = Facts { version: FACTS_VERSION, ..Facts::default() };
     for e in evs {
         match &e.kind {
             EvKind::ToolUse { .. } if e.ts.len() >= 13 => *f.tool_calls_by_utc_hour.entry(e.ts[..13].to_string()).or_insert(0) += 1,
-            EvKind::ToolResult { text, .. } if is_guard_rejection(text) => f.guard_rejections += 1,
+            EvKind::ToolResult { is_error: true, text, .. } => {
+                let head = text.trim_start().lines().next().unwrap_or_default();
+                if is_hook_timeout(head) {
+                    f.hook_timeouts += 1;
+                } else if is_guard_rejection(head) {
+                    f.guard_rejections += 1;
+                }
+            }
+            EvKind::HookNoResponse { .. } => f.hook_timeouts += 1,
             _ => {}
         }
     }
-    f.hook_timeouts = detect_hook_timeout(evs).len();
     f
 }
 
