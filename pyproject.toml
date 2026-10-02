@@ -46,7 +46,7 @@ coding = [
 ]
 # python -m rrsi harness mine: the LLM stage on the logged-in Claude Code
 harness = ["claude-agent-sdk>=0.2"]
-dev = ["pytest>=7.0"]
+dev = ["pytest>=7.0", "jsonschema>=4.0"]
 
 [build-system]
 requires = ["setuptools>=68"]

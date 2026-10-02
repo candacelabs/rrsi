@@ -39,24 +39,28 @@ def episode(i, session, project, signals, text="Exit code 1"):
 
 
 class FakeModel:
-    """Labels by the first signal; clusters hook/permission together; writes a fixed task."""
+    """Labels by the first signal (an alias for odd ids, a canonical id for even
+    ones); clusters hook/permission together where a mode still clusters;
+    writes a fixed task."""
 
     def __init__(self):
         self.calls = {"label": 0, "cluster": 0, "task": 0}
         self.prompts = []
+        self.schemas = []
 
     def __call__(self, system, prompt, schema, out):
         self.prompts.append(prompt)
+        self.schemas.append(schema)
         if "labels" in schema["properties"]:
             self.calls["label"] += 1
             ids = [l.split("]")[0][1:] for l in prompt.splitlines() if l.startswith("[ep")]
-            return {"labels": [{"id": i, "pattern": "Noise" if i.endswith("9") else
-                                ("Hook Timeout!" if int(i[2:]) % 2 else "permission blocked"),
-                                "summary": f"summary of {i}", "harness_fixable": True} for i in ids]}
+            return {"labels": [{"id": i, "pattern": "noise" if i.endswith("9") else
+                                ("hook_timeout_blocks_writes" if int(i[2:]) % 2 else "permission_denied_tool_use"),
+                                "new_pattern": "", "summary": f"summary of {i}", "harness_fixable": True} for i in ids]}
         if "clusters" in schema["properties"]:
             self.calls["cluster"] += 1
             return {"clusters": [{"key": "Blocked Tools", "title": "Tool calls blocked",
-                                  "patterns": ["hook_timeout", "permission_blocked", "made_up"]}]}
+                                  "patterns": ["hook_timeout_blocks_writes", "permission_denied_tool_use", "made_up"]}]}
         self.calls["task"] += 1
         extra = ({"trigger_rule": {"when": "w", "owner_resolution": "o", "payload": "p",
                                    "rule": "when two sessions edit one file, message the claimant"}}
@@ -92,24 +96,33 @@ class HarnessMinerTest(unittest.TestCase):
     def test_end_to_end_counts_are_measured_not_generated(self):
         fake = FakeModel()
         run = self.run_mine(fake)
-        self.assertEqual(fake.calls, {"label": 4, "cluster": 1, "task": 1})
-        task = json.loads((self.out / "tasks" / "blocked_tools.json").read_text())
+        # traces mode labels against the canonical vocabulary: the ids are the
+        # clusters, so no cluster call, and one task per id.
+        self.assertEqual(fake.calls, {"label": 4, "cluster": 0, "task": 2})
+        self.assertIn("hook_timeout_blocks_tools", fake.schemas[0]["properties"]["labels"]["items"]["properties"]["pattern"]["enum"])
+        task = json.loads((self.out / "tasks" / "permission_denied_tool_use.json").read_text())
         ev = task["evidence"]
-        # 20 episodes, ep0009 and ep0019 labelled noise.
-        self.assertEqual(ev["episodes"], 18)
-        self.assertEqual(ev["sessions"], 3)
-        self.assertEqual(ev["projects"], 2)
-        self.assertEqual(ev["signals"], {"tool_error": 8, "hook_timeout": 10})
-        self.assertEqual(len(ev["episode_ids"]), 18)
-        self.assertEqual(run["tasks"], 1)
+        # 20 episodes: even ids (all in proj0) are permission denials, odd ids (proj1) hook timeouts,
+        # ep0009 and ep0019 noise.
+        self.assertEqual((ev["episodes"], ev["sessions"], ev["projects"]), (10, 3, 1))
+        self.assertEqual(ev["signals"], {"hook_timeout": 10})
+        self.assertEqual(len(ev["episode_ids"]), 10)
+        hook = json.loads((self.out / "tasks" / "hook_timeout_blocks_tools.json").read_text())["evidence"]
+        self.assertEqual((hook["episodes"], hook["signals"]), (8, {"tool_error": 8}))
+        self.assertEqual(run["tasks"], 2)
         index = json.loads((self.out / "tasks" / "index.json").read_text())
-        self.assertEqual(index[0]["episodes"], 18)
+        self.assertEqual([i["episodes"] for i in index], [10, 8])
         exam = (self.out / "exam_candidates.jsonl").read_text().splitlines()
-        self.assertEqual(json.loads(exam[0])["task"], "blocked_tools")
+        self.assertEqual(json.loads(exam[0])["task"], "permission_denied_tool_use")
         report = (self.out / "REPORT.md").read_text()
-        self.assertIn("| 1 | Stop blocked tool calls | 18 | 3 | 2 |", report)
+        self.assertIn("| 1 | Stop blocked tool calls | 10 | 3 | 1 |", report)
         self.assertIn("c \\| d", report)
         self.assertIn("| hook_timeout | 10 | 20 |", report)
+        # The alias the model answered is kept as `raw`; the record carries its canonical id.
+        recs = [json.loads(l) for l in (self.out / "labels.jsonl").read_text().splitlines()]
+        odd = next(r for r in recs if r["id"] == "ep0001")
+        self.assertEqual((odd["raw"], odd["pattern"], odd["canonical"]),
+                         ("hook_timeout_blocks_writes", "hook_timeout_blocks_tools", True))
 
     def test_handoffs_mode_carries_trigger_rules_and_peer_outcomes(self):
         out = Path(self.tmp.name) / "handoffs"

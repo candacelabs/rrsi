@@ -131,8 +131,11 @@
 > 2. `python -m rrsi harness mine` runs stage 1, then has a model (default:
 >    `claude-opus-5-5` through the Claude Agent SDK on the logged-in Claude
 >    Code, no API key; `--backend copilot|codex` use those logged-in CLIs)
->    label each episode with a recurring-struggle pattern, merge patterns into
->    clusters and write one task per top cluster: title, pattern, evidence
+>    label each episode with a canonical recurring-struggle pattern (a fixed
+>    choice from [`rrsi/harness/patterns.json`](rrsi/harness/patterns.json),
+>    each id with the alias slugs earlier runs produced, plus an explicit
+>    `new_pattern` escape that stays visible until it gets an id or an alias)
+>    and write one task per top pattern: title, pattern, evidence
 >    (episode ids and counts), root-cause hypothesis, proposed harness fix
 >    (CLAUDE.md rule, skill, house-lint gate rule, memory, tool/CLI fix or
 >    doc), acceptance check and priority, plus RRSI-style exam candidates where
@@ -148,6 +151,31 @@
 > Output: `DIR/episodes.jsonl`, `DIR/tasks/<id>.json` + `index.json`,
 > `DIR/exam_candidates.jsonl`, `DIR/REPORT.md` (the top recurring struggles
 > with episode, session and project counts and the proposed fix).
+>
+> **Is the harness compounding? One repeatable measurement.**
+> `python -m rrsi harness measure` turns the same episodes into a daily
+> series: harness-fixable struggle episodes per 1,000 agent tool calls, by
+> host and by canonical pattern. Stage 1 is incremental (`traces-state.json`
+> keeps, per transcript, its tool calls per UTC hour and the Claude Desktop
+> host markers), new episodes are labelled with the vocabulary, and every
+> session gets a denominator and a host behind one interface: tool calls from
+> the transcript, or from the CSF harness run record
+> (`~/.local/state/csf/harness/<assignment>/events.jsonl`) for sessions the
+> harness launched (`csf_harness`); a session whose transcript shows the
+> Claude Desktop host's injected hooks (registered as callbacks, timing out,
+> or rejecting a command as its worktree guard) is `desktop_hosted`, the rest
+> `cli`. Days close at
+> 23:59:59 America/Los_Angeles: `DIR/daily/<day>.json`
+> ([`daily.schema.json`](rrsi/harness/daily.schema.json)) says whether the
+> day had ended when it was computed, `DIR/series.jsonl` carries the dashboard
+> series, `DIR/measure-run.json` the run receipt and `DIR/MEASURE.md` the
+> report: verdict first, rate by week with n and 95% CI, top patterns, the
+> host A/B. Counts only, no transcript text. Safe to run at every session end.
+>
+> ```bash
+> python -m rrsi harness measure --print              # -> ~/rrsi-private/harness/{daily,series.jsonl,MEASURE.md}
+> python -m rrsi harness measure --skip-label --quiet # no model call: records from the cached labels
+> ```
 >
 > **Handoffs: when should agents have talked to each other?** A second
 > transcript miner, `handoffs`, looks at several concurrent sessions at once.

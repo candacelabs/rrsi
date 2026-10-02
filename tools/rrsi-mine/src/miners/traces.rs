@@ -29,8 +29,11 @@
 //!
 //! - `DIR/episodes/<file-key>.jsonl` — the episodes of one transcript
 //! - `DIR/episodes.jsonl` — all episodes, rebuilt every run
-//! - `DIR/traces-state.json` — per transcript: mtime, size, content hash;
-//!   an unchanged transcript is skipped on the next run (resume-safe)
+//! - `DIR/traces-state.json` — per transcript: mtime, size, content hash
+//!   (an unchanged transcript is skipped on the next run, resume-safe) and
+//!   its [`Facts`]: tool calls per UTC hour and the Claude Desktop host
+//!   markers, which `python -m rrsi harness measure` turns into the daily
+//!   struggle rate per 1k tool calls and the host attribution
 //! - `DIR/traces-summary.json` — counts per signal, sessions, projects
 
 use crate::enclosing_work_tree;
@@ -90,7 +93,14 @@ pub struct Session {
     pub session_id: String,
     pub agent_id: Option<String>,
     pub events: Vec<Ev>,
+    /// `system` lines whose `hookInfos` register a [`HOST_HOOK_COMMAND`]
+    /// hook: the Claude Desktop host injecting its hooks into the session.
+    pub host_hook_callbacks: usize,
 }
+
+/// How the Claude Desktop host's injected hooks appear in `hookInfos`
+/// (in-process callbacks, never a command in a settings file).
+pub const HOST_HOOK_COMMAND: &str = "callback";
 
 /// The named struggle detectors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -259,6 +269,13 @@ fn parse_event(e: &Value, ses: &mut Session) {
                 _ => {}
             }
         }
+        "system" => {
+            if let Some(Value::Array(hooks)) = e.get("hookInfos") {
+                if hooks.iter().any(|h| h.get("command").and_then(Value::as_str) == Some(HOST_HOOK_COMMAND)) {
+                    ses.host_hook_callbacks += 1;
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -266,6 +283,8 @@ fn parse_event(e: &Value, ses: &mut Session) {
 // -------------------------------------------------------------- detectors
 
 pub const HOOK_TIMEOUT_MARKERS: [&str; 2] = ["hook did not respond", "hook didn't respond"];
+/// The Claude Desktop host's worktree isolation guard rejecting a tool call.
+pub const GUARD_MARKERS: [&str; 2] = ["isolated in the worktree", "running in an isolated git worktree"];
 pub const DENIAL_MARKERS: [&str; 4] = [
     "doesn't want to proceed with this tool use",
     "denied by the Claude Code auto mode classifier",
@@ -275,6 +294,10 @@ pub const DENIAL_MARKERS: [&str; 4] = [
 
 fn is_hook_timeout(text: &str) -> bool {
     HOOK_TIMEOUT_MARKERS.iter().any(|m| text.contains(m))
+}
+
+pub fn is_guard_rejection(text: &str) -> bool {
+    GUARD_MARKERS.iter().any(|m| text.contains(m))
 }
 
 fn is_denial(text: &str, denial: &Option<String>) -> bool {
@@ -577,6 +600,58 @@ pub fn episodes(ses: &Session, project: &str, file: &str) -> Vec<Episode> {
     }).collect()
 }
 
+// ------------------------------------------------------------------ facts
+
+/// Bump when [`facts`] changes meaning: every transcript is then re-read
+/// once, however unchanged, so the state never mixes two definitions.
+pub const FACTS_VERSION: u32 = 3;
+
+/// What one transcript contributes to the struggle-rate measurement: the
+/// denominator (tool calls, bucketed by UTC hour so the measurement can
+/// close its days in any whole-hour zone) and the Claude Desktop host
+/// markers that attribute the session to a host.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Facts {
+    /// [`FACTS_VERSION`] these facts were computed under.
+    pub version: u32,
+    /// `YYYY-MM-DDTHH` (UTC) -> tool calls started in that hour.
+    pub tool_calls_by_utc_hour: BTreeMap<String, usize>,
+    /// Error results whose first line says a host hook did not respond
+    /// ([`HOOK_TIMEOUT_MARKERS`]), plus the host's own no-response notes.
+    pub hook_timeouts: usize,
+    /// Error results whose first line is the host's worktree guard refusing
+    /// the call ([`GUARD_MARKERS`]).
+    pub guard_rejections: usize,
+    /// `system` lines registering the host's injected hooks
+    /// ([`HOST_HOOK_COMMAND`]): the host is present even when nothing failed.
+    #[serde(default)]
+    pub host_hook_callbacks: usize,
+}
+
+/// A host marker is the host's own message opening an error result, or the
+/// host registering its hooks. A successful result that merely quotes the
+/// phrase (an agent grepping the mined data, say) is not one; the signals
+/// above stay as broad as before.
+pub fn facts(ses: &Session) -> Facts {
+    let mut f = Facts { version: FACTS_VERSION, host_hook_callbacks: ses.host_hook_callbacks, ..Facts::default() };
+    for e in &ses.events {
+        match &e.kind {
+            EvKind::ToolUse { .. } if e.ts.len() >= 13 => *f.tool_calls_by_utc_hour.entry(e.ts[..13].to_string()).or_insert(0) += 1,
+            EvKind::ToolResult { is_error: true, text, .. } => {
+                let head = text.trim_start().lines().next().unwrap_or_default();
+                if is_hook_timeout(head) {
+                    f.hook_timeouts += 1;
+                } else if is_guard_rejection(head) {
+                    f.guard_rejections += 1;
+                }
+            }
+            EvKind::HookNoResponse { .. } => f.hook_timeouts += 1,
+            _ => {}
+        }
+    }
+    f
+}
+
 // ------------------------------------------------------------------ driver
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -587,6 +662,10 @@ pub struct FileState {
     pub since: String,
     pub episodes: usize,
     pub events: usize,
+    /// Absent in state files written before the measurement existed; such a
+    /// transcript is re-read once (its `version` is then 0).
+    #[serde(default)]
+    pub facts: Facts,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -612,15 +691,18 @@ fn process(root: &Path, out: &Path, rel: &str, since: &str, prev: Option<&FileSt
     let path = root.join(rel);
     let (mtime, size) = mtime_size(&path)?;
     let outfile = out.join("episodes").join(format!("{}.jsonl", file_key(rel)));
+    // The cursor: the previous state stands while the transcript, the
+    // --since window and the facts definition are all unchanged.
+    let fresh = |p: &FileState| p.since == since && p.facts.version == FACTS_VERSION && outfile.exists();
     if let Some(p) = prev {
-        if p.mtime == mtime && p.size == size && p.since == since && outfile.exists() {
+        if p.mtime == mtime && p.size == size && fresh(p) {
             return Ok((p.clone(), false));
         }
     }
     let bytes = std::fs::read(&path)?;
     let hash = format!("{:016x}", fnv64(&bytes));
     if let Some(p) = prev {
-        if p.hash == hash && p.since == since && outfile.exists() {
+        if p.hash == hash && fresh(p) {
             return Ok((FileState { mtime, size, ..p.clone() }, false));
         }
     }
@@ -634,7 +716,8 @@ fn process(root: &Path, out: &Path, rel: &str, since: &str, prev: Option<&FileSt
         text.push('\n');
     }
     std::fs::write(&outfile, text)?;
-    Ok((FileState { mtime, size, hash, since: since.into(), episodes: eps.len(), events: ses.events.len() }, true))
+    Ok((FileState { mtime, size, hash, since: since.into(), episodes: eps.len(), events: ses.events.len(),
+                    facts: facts(&ses) }, true))
 }
 
 /// Mines every transcript under `root` into `out` (see the module docs).
@@ -765,7 +848,8 @@ impl crate::miner::Miner for Traces {
     fn records(&self) -> &'static [(&'static str, &'static str)] {
         &[("episodes.jsonl", "one struggle episode: session, signals, bounded context, counts"),
           ("traces-summary.json", "counts per signal, sessions, projects"),
-          ("traces-state.json", "per transcript mtime/size/hash for incremental runs")]
+          ("traces-state.json", "per transcript: mtime/size/hash for incremental runs, tool calls per UTC hour, \
+                                 Desktop host markers (injected hooks, hook timeouts, worktree-guard rejections)")]
     }
     fn run(&self, args: Value) -> Result<Value> {
         let a: Args = crate::miner::parse_args(self.name(), args)?;
