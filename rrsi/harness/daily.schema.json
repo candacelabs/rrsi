@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/candacelabs/rrsi/rrsi/harness/daily.schema.json",
+  "title": "rrsi.harness.daily/1",
+  "description": "One America/Los_Angeles day of the struggle-rate measurement: harness-fixable struggle episodes (rrsi-mine traces, labelled with the canonical vocabulary) per 1,000 agent tool calls, by host and by pattern. Written by `python -m rrsi harness measure` as OUT/daily/<day>.json; OUT/series.jsonl carries the same numbers as dashboard series. Counts only; never transcript text.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "day", "timezone", "closed", "computed_at", "revision", "vocabulary", "sessions", "tool_calls",
+               "episodes", "labelled", "noise", "struggles", "rate_per_1k", "ci95", "hosts", "patterns", "uncanonical"],
+  "properties": {
+    "schema": {"const": "rrsi.harness.daily/1"},
+    "day": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+    "timezone": {"const": "America/Los_Angeles"},
+    "closed": {"type": "boolean", "description": "true once the day ended (23:59:59 in the timezone) before computed_at; an open day is partial and is recomputed by the next run"},
+    "computed_at": {"type": "string", "format": "date-time"},
+    "revision": {"type": "string", "description": "rrsi git revision that computed the record (the procedure's version)"},
+    "vocabulary": {"type": "string", "description": "fingerprint of patterns.json; a change of vocabulary is a change of method"},
+    "sessions": {"type": "integer", "minimum": 0, "description": "sessions with a tool call or an episode that day"},
+    "tool_calls": {"type": "integer", "minimum": 0, "description": "the denominator: tool calls started that day, all hosts"},
+    "episodes": {"type": "integer", "minimum": 0},
+    "labelled": {"type": "integer", "minimum": 0, "description": "episodes with a label; episodes - labelled are unlabelled and make the rate a lower bound"},
+    "noise": {"type": "integer", "minimum": 0},
+    "struggles": {"type": "integer", "minimum": 0, "description": "the numerator: labelled, non-noise, harness-fixable episodes"},
+    "rate_per_1k": {"type": ["number", "null"], "minimum": 0, "description": "struggles per 1,000 tool calls; null when there were no tool calls (no data, not a zero)"},
+    "ci95": {"$ref": "#/$defs/ci"},
+    "hosts": {
+      "type": "object",
+      "additionalProperties": false,
+      "propertyNames": {"enum": ["csf_harness", "desktop_hosted", "cli"]},
+      "patternProperties": {"^(csf_harness|desktop_hosted|cli)$": {"$ref": "#/$defs/slice"}}
+    },
+    "patterns": {
+      "type": "object",
+      "description": "canonical pattern id -> counts (noise excluded)",
+      "additionalProperties": {
+        "type": "object", "additionalProperties": false, "required": ["episodes", "harness_fixable", "hosts"],
+        "properties": {
+          "episodes": {"type": "integer", "minimum": 0},
+          "harness_fixable": {"type": "integer", "minimum": 0},
+          "hosts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}}
+        }
+      }
+    },
+    "uncanonical": {"type": "object", "description": "new_pattern escapes seen that day: raw slug -> episodes", "additionalProperties": {"type": "integer", "minimum": 1}}
+  },
+  "$defs": {
+    "ci": {
+      "description": "95% interval of rate_per_1k (Garwood exact Poisson bounds via the Wilson-Hilferty approximation); null with rate_per_1k",
+      "type": ["array", "null"], "items": {"type": "number", "minimum": 0}, "minItems": 2, "maxItems": 2
+    },
+    "slice": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sessions", "tool_calls", "struggles", "rate_per_1k", "ci95"],
+      "properties": {
+        "sessions": {"type": "integer", "minimum": 0},
+        "tool_calls": {"type": "integer", "minimum": 0},
+        "struggles": {"type": "integer", "minimum": 0},
+        "rate_per_1k": {"type": ["number", "null"], "minimum": 0},
+        "ci95": {"$ref": "#/$defs/ci"}
+      }
+    }
+  }
+}

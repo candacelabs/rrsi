@@ -49,13 +49,13 @@ from pathlib import Path
 from typing import Callable
 
 from rrsi.harness.llm import LLMAuthError, LLMError, complete_json
+from rrsi.harness.patterns import NEW_PATTERN, NOISE, Vocabulary, slug
 
 ROOT = Path(__file__).resolve().parents[2]
 CRATE = ROOT / "tools" / "rrsi-mine"
 DEFAULT_OUT = Path.home() / "rrsi-private" / "harness"
 FIX_KINDS = ["claude_md_rule", "skill", "house_lint_gate", "memory", "tool_cli_fix", "doc"]
 PRIORITIES = ["P0", "P1", "P2", "P3"]
-NOISE = "noise"
 RETRIES = 1
 
 # (backend-agnostic) system, prompt, schema, cwd -> dict
@@ -186,38 +186,71 @@ LABEL_SCHEMA = {
 }
 
 
-def slug(t: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "_", (t or "").lower()).strip("_")[:60] or NOISE
+def label_schema(vocabulary: Vocabulary) -> dict:
+    """LABEL_SCHEMA with `pattern` a constrained choice and the `new_pattern` escape."""
+    schema = json.loads(json.dumps(LABEL_SCHEMA))
+    item = schema["properties"]["labels"]["items"]
+    item["properties"]["pattern"] = {"type": "string", "enum": vocabulary.choices()}
+    item["properties"][NEW_PATTERN] = {"type": "string"}
+    item["required"].append(NEW_PATTERN)
+    return schema
 
 
-def load_labels(out: Path) -> dict[str, dict]:
+def vocabulary_instructions(vocabulary: Vocabulary) -> str:
+    return ("\nChoose `pattern` from this fixed vocabulary (the id before the colon), the cause that fits best:\n"
+            f"{vocabulary.prompt_lines()}\n"
+            f'If no id names the cause, answer pattern "{NEW_PATTERN}" and put a new lowercase snake_case slug for the cause in '
+            f'`{NEW_PATTERN}`; otherwise leave `{NEW_PATTERN}` empty (""). Answer "{NOISE}" as above when it is not a real struggle.')
+
+
+def load_labels(out: Path, vocabulary: Vocabulary | None = None) -> dict[str, dict]:
+    """The cached labels; with a vocabulary, every record's pattern is folded
+    to its canonical id on the way in (`raw` keeps what the model said, so a
+    later alias still reaches an old label)."""
     path = out / "labels.jsonl"
     labels = {}
     if path.exists():
         for line in path.read_text().splitlines():
             if line.strip():
                 rec = json.loads(line)
+                if vocabulary is not None:
+                    f = vocabulary.fold(rec.get("raw", rec["pattern"]))
+                    rec = {**rec, "raw": rec.get("raw", rec["pattern"]), "pattern": f.pattern, "canonical": f.canonical}
                 labels[rec["id"]] = rec
     return labels
 
 
 def label(out: Path, episodes: list[dict], complete: Complete, batch: int, jobs: int,
-          log: Callable[[str], None] = print, system: str | None = None) -> tuple[dict[str, dict], int]:
-    """Labels every unlabelled episode; returns (labels, failed batches)."""
-    labels = load_labels(out)
+          log: Callable[[str], None] = print, system: str | None = None,
+          vocabulary: Vocabulary | None = None) -> tuple[dict[str, dict], int]:
+    """Labels every unlabelled episode; returns (labels, failed batches).
+    With a vocabulary the model picks a canonical id (or escapes with
+    `new_pattern`); without one it names a free slug as before."""
+    labels = load_labels(out, vocabulary)
     todo = sorted((e for e in episodes if e["id"] not in labels),
                   key=lambda e: (e["project"], e["file"], e["start_event"]))
     batches = [todo[i:i + batch] for i in range(0, len(todo), batch)]
     log(f"[label] {len(labels)} cached, {len(todo)} to label in {len(batches)} batches")
     failed = 0
+    schema = LABEL_SCHEMA if vocabulary is None else label_schema(vocabulary)
+    system = (system or LABEL_SYSTEM) + ("" if vocabulary is None else vocabulary_instructions(vocabulary))
 
     def one(b: list[dict]) -> list[dict]:
         prompt = "Episodes:\n\n" + "\n\n".join(digest(e) for e in b)
-        got = complete(system or LABEL_SYSTEM, prompt, LABEL_SCHEMA, out)
+        got = complete(system, prompt, schema, out)
         want = {e["id"] for e in b}
-        recs = [{"id": l["id"], "pattern": slug(l["pattern"]), "summary": _trunc(l["summary"], 300),
-                 "harness_fixable": bool(l["harness_fixable"])}
-                for l in got.get("labels", []) if l.get("id") in want]
+        recs = []
+        for l in got.get("labels", []):
+            if l.get("id") not in want:
+                continue
+            rec = {"id": l["id"], "summary": _trunc(l["summary"], 300), "harness_fixable": bool(l["harness_fixable"])}
+            if vocabulary is None:
+                rec["pattern"] = slug(l["pattern"])
+            else:
+                raw = (l.get(NEW_PATTERN) or "").strip() if l["pattern"] == NEW_PATTERN else l["pattern"]
+                f = vocabulary.fold(raw or "unnamed")
+                rec.update(raw=slug(raw or "unnamed"), pattern=f.pattern, canonical=f.canonical)
+            recs.append(rec)
         return recs
 
     with ThreadPoolExecutor(max_workers=max(jobs, 1)) as pool, (out / "labels.jsonl").open("a") as f:
@@ -257,8 +290,13 @@ CLUSTER_SCHEMA = {
 
 
 def cluster(out: Path, labels: dict[str, dict], complete: Complete,
-            log: Callable[[str], None] = print) -> dict[str, dict]:
-    """pattern slug -> {key, title}; cached while the slug set is unchanged."""
+            log: Callable[[str], None] = print, vocabulary: Vocabulary | None = None) -> dict[str, dict]:
+    """pattern slug -> {key, title}; cached while the slug set is unchanged.
+    With a vocabulary the ids are the clusters (no model call): a canonical
+    id is its own cluster, and so is each `new_pattern` escape, visibly."""
+    if vocabulary is not None:
+        return {p: {"key": p, "title": vocabulary.title(p)}
+                for p in sorted({r["pattern"] for r in labels.values() if r["pattern"] != NOISE})}
     by_pat: dict[str, list[str]] = defaultdict(list)
     for rec in labels.values():
         if rec["pattern"] != NOISE:
@@ -596,11 +634,13 @@ class Mode:
     unit: str
     out: Path
     miner_args: tuple[str, ...] = ()
+    #: The canonical pattern ids the labeler chooses from (free slugs when None).
+    vocabulary: Vocabulary | None = None
 
 
 MODES = {
     "traces": Mode("traces", "traces-summary.json", LABEL_SYSTEM, TASK_SYSTEM, TASK_SCHEMA,
-                   "Harness struggles", "struggle", DEFAULT_OUT),
+                   "Harness struggles", "struggle", DEFAULT_OUT, vocabulary=Vocabulary.load()),
     "handoffs": Mode("handoffs", "handoffs-summary.json", HANDOFF_LABEL_SYSTEM, HANDOFF_TASK_SYSTEM,
                      HANDOFF_TASK_SCHEMA, "Agent handoffs", "coordination pattern", DEFAULT_OUT / "handoffs"),
     "pr-gap": Mode("pr-gap", "pr-gap-summary.json", PR_GAP_LABEL_SYSTEM, PR_GAP_TASK_SYSTEM, HANDOFF_TASK_SCHEMA,
@@ -610,6 +650,24 @@ MODES = {
 
 # ---------------------------------------------------------------- main
 
+def completer(backend: str, model: str, effort: str) -> Complete:
+    """The model call every stage shares: one retry for a malformed reply,
+    the raw reply kept privately under OUT when it fails."""
+    def complete(system, prompt, schema, o):
+        for attempt in range(RETRIES + 1):
+            try:
+                return complete_json(backend, model, system, prompt, schema, ensure_private(o / "llm-cwd"), effort)
+            except LLMAuthError:
+                raise
+            except LLMError as e:
+                if len(e.args) > 1:
+                    (o / "llm-failures").mkdir(exist_ok=True)
+                    (o / "llm-failures" / f"{time.time_ns()}.txt").write_text(str(e.args[1]))
+                if attempt == RETRIES:
+                    raise
+    return complete
+
+
 def mine(out: Path | None = None, root: Path | None = None, since: str = "", backend: str = "sdk",
          model: str | None = None, jobs: int = 4, batch: int = 25, top: int = 20, min_episodes: int = 2,
          exclude: list[str] | None = None, skip_traces: bool = False, effort: str = "medium",
@@ -618,20 +676,7 @@ def mine(out: Path | None = None, root: Path | None = None, since: str = "", bac
     mode = MODES[miner]
     out = ensure_private((out or mode.out).expanduser())
     model = model or DEFAULT_MODEL.get(backend, "")
-    if complete is None:
-        def complete(system, prompt, schema, o):
-            for attempt in range(RETRIES + 1):  # one retry for a malformed reply
-                try:
-                    return complete_json(backend, model, system, prompt, schema,
-                                         ensure_private(o / "llm-cwd"), effort)
-                except LLMAuthError:
-                    raise
-                except LLMError as e:
-                    if len(e.args) > 1:  # keep the raw reply, privately, for debugging
-                        (o / "llm-failures").mkdir(exist_ok=True)
-                        (o / "llm-failures" / f"{time.time_ns()}.txt").write_text(str(e.args[1]))
-                    if attempt == RETRIES:
-                        raise
+    complete = complete or completer(backend, model, effort)
     t0 = time.time()
     secs = {}
     if not skip_traces:
@@ -642,12 +687,12 @@ def mine(out: Path | None = None, root: Path | None = None, since: str = "", bac
     log(f"[{mode.miner}] {summary['episodes']} episodes from {summary['transcripts']} transcripts")
     episodes = load_episodes(out)
     t = time.time()
-    labels, failed_label = label(out, episodes, complete, batch, jobs, log, mode.label_system)
+    labels, failed_label = label(out, episodes, complete, batch, jobs, log, mode.label_system, mode.vocabulary)
     secs["label"] = time.time() - t
     live = {e["id"] for e in episodes}
     labels = {k: v for k, v in labels.items() if k in live}
     t = time.time()
-    mapping = cluster(out, labels, complete, log)
+    mapping = cluster(out, labels, complete, log, mode.vocabulary)
     secs["cluster"] = time.time() - t
     groups = evidence(episodes, labels, mapping)
     t = time.time()

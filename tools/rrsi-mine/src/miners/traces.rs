@@ -29,8 +29,11 @@
 //!
 //! - `DIR/episodes/<file-key>.jsonl` — the episodes of one transcript
 //! - `DIR/episodes.jsonl` — all episodes, rebuilt every run
-//! - `DIR/traces-state.json` — per transcript: mtime, size, content hash;
-//!   an unchanged transcript is skipped on the next run (resume-safe)
+//! - `DIR/traces-state.json` — per transcript: mtime, size, content hash
+//!   (an unchanged transcript is skipped on the next run, resume-safe) and
+//!   its [`Facts`]: tool calls per UTC hour and the Claude Desktop host
+//!   markers, which `python -m rrsi harness measure` turns into the daily
+//!   struggle rate per 1k tool calls and the host attribution
 //! - `DIR/traces-summary.json` — counts per signal, sessions, projects
 
 use crate::enclosing_work_tree;
@@ -266,6 +269,8 @@ fn parse_event(e: &Value, ses: &mut Session) {
 // -------------------------------------------------------------- detectors
 
 pub const HOOK_TIMEOUT_MARKERS: [&str; 2] = ["hook did not respond", "hook didn't respond"];
+/// The Claude Desktop host's worktree isolation guard rejecting a tool call.
+pub const GUARD_MARKERS: [&str; 2] = ["isolated in the worktree", "running in an isolated git worktree"];
 pub const DENIAL_MARKERS: [&str; 4] = [
     "doesn't want to proceed with this tool use",
     "denied by the Claude Code auto mode classifier",
@@ -275,6 +280,10 @@ pub const DENIAL_MARKERS: [&str; 4] = [
 
 fn is_hook_timeout(text: &str) -> bool {
     HOOK_TIMEOUT_MARKERS.iter().any(|m| text.contains(m))
+}
+
+pub fn is_guard_rejection(text: &str) -> bool {
+    GUARD_MARKERS.iter().any(|m| text.contains(m))
 }
 
 fn is_denial(text: &str, denial: &Option<String>) -> bool {
@@ -577,6 +586,41 @@ pub fn episodes(ses: &Session, project: &str, file: &str) -> Vec<Episode> {
     }).collect()
 }
 
+// ------------------------------------------------------------------ facts
+
+/// Bump when [`facts`] changes meaning: every transcript is then re-read
+/// once, however unchanged, so the state never mixes two definitions.
+pub const FACTS_VERSION: u32 = 1;
+
+/// What one transcript contributes to the struggle-rate measurement: the
+/// denominator (tool calls, bucketed by UTC hour so the measurement can
+/// close its days in any whole-hour zone) and the Claude Desktop host
+/// markers that attribute the session to a host.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Facts {
+    /// [`FACTS_VERSION`] these facts were computed under.
+    pub version: u32,
+    /// `YYYY-MM-DDTHH` (UTC) -> tool calls started in that hour.
+    pub tool_calls_by_utc_hour: BTreeMap<String, usize>,
+    /// Tool results saying a host hook did not respond ([`HOOK_TIMEOUT_MARKERS`]).
+    pub hook_timeouts: usize,
+    /// Tool results rejected by the host's worktree guard ([`GUARD_MARKERS`]).
+    pub guard_rejections: usize,
+}
+
+pub fn facts(evs: &[Ev]) -> Facts {
+    let mut f = Facts { version: FACTS_VERSION, ..Facts::default() };
+    for e in evs {
+        match &e.kind {
+            EvKind::ToolUse { .. } if e.ts.len() >= 13 => *f.tool_calls_by_utc_hour.entry(e.ts[..13].to_string()).or_insert(0) += 1,
+            EvKind::ToolResult { text, .. } if is_guard_rejection(text) => f.guard_rejections += 1,
+            _ => {}
+        }
+    }
+    f.hook_timeouts = detect_hook_timeout(evs).len();
+    f
+}
+
 // ------------------------------------------------------------------ driver
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -587,6 +631,10 @@ pub struct FileState {
     pub since: String,
     pub episodes: usize,
     pub events: usize,
+    /// Absent in state files written before the measurement existed; such a
+    /// transcript is re-read once (its `version` is then 0).
+    #[serde(default)]
+    pub facts: Facts,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -612,15 +660,18 @@ fn process(root: &Path, out: &Path, rel: &str, since: &str, prev: Option<&FileSt
     let path = root.join(rel);
     let (mtime, size) = mtime_size(&path)?;
     let outfile = out.join("episodes").join(format!("{}.jsonl", file_key(rel)));
+    // The cursor: the previous state stands while the transcript, the
+    // --since window and the facts definition are all unchanged.
+    let fresh = |p: &FileState| p.since == since && p.facts.version == FACTS_VERSION && outfile.exists();
     if let Some(p) = prev {
-        if p.mtime == mtime && p.size == size && p.since == since && outfile.exists() {
+        if p.mtime == mtime && p.size == size && fresh(p) {
             return Ok((p.clone(), false));
         }
     }
     let bytes = std::fs::read(&path)?;
     let hash = format!("{:016x}", fnv64(&bytes));
     if let Some(p) = prev {
-        if p.hash == hash && p.since == since && outfile.exists() {
+        if p.hash == hash && fresh(p) {
             return Ok((FileState { mtime, size, ..p.clone() }, false));
         }
     }
@@ -634,7 +685,8 @@ fn process(root: &Path, out: &Path, rel: &str, since: &str, prev: Option<&FileSt
         text.push('\n');
     }
     std::fs::write(&outfile, text)?;
-    Ok((FileState { mtime, size, hash, since: since.into(), episodes: eps.len(), events: ses.events.len() }, true))
+    Ok((FileState { mtime, size, hash, since: since.into(), episodes: eps.len(), events: ses.events.len(),
+                    facts: facts(&ses.events) }, true))
 }
 
 /// Mines every transcript under `root` into `out` (see the module docs).
@@ -765,7 +817,8 @@ impl crate::miner::Miner for Traces {
     fn records(&self) -> &'static [(&'static str, &'static str)] {
         &[("episodes.jsonl", "one struggle episode: session, signals, bounded context, counts"),
           ("traces-summary.json", "counts per signal, sessions, projects"),
-          ("traces-state.json", "per transcript mtime/size/hash for incremental runs")]
+          ("traces-state.json", "per transcript: mtime/size/hash for incremental runs, tool calls per UTC hour, \
+                                 Desktop host markers (hook timeouts, worktree-guard rejections)")]
     }
     fn run(&self, args: Value) -> Result<Value> {
         let a: Args = crate::miner::parse_args(self.name(), args)?;

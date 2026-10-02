@@ -19,22 +19,29 @@ use super::*;
 use serde_json::json;
 
 fn ts(n: usize) -> String {
-    format!("2026-01-01T00:{:02}:{:02}.000Z", n / 60, n % 60)
+    format!("2026-01-01T{:02}:{:02}:{:02}.000Z", n / 3600, (n / 60) % 60, n % 60)
 }
 
-/// Builds a synthetic transcript, one JSON line per call.
+/// Builds a synthetic transcript, one JSON line per call, one second apart.
 #[derive(Default)]
 struct T {
     lines: Vec<String>,
     sidechain: bool,
+    /// Seconds added to every later line's timestamp (see [`T::skip`]).
+    clock: usize,
 }
 
 impl T {
     fn sub() -> T {
         T { sidechain: true, ..T::default() }
     }
+    /// Lets the clock jump ahead by `secs`.
+    fn skip(&mut self, secs: usize) -> &mut Self {
+        self.clock += secs;
+        self
+    }
     fn push(&mut self, mut v: Value) -> &mut Self {
-        let n = self.lines.len();
+        let n = self.lines.len() + self.clock;
         v["timestamp"] = json!(ts(n));
         v["sessionId"] = json!("ses-1");
         v["isSidechain"] = json!(self.sidechain);
@@ -244,6 +251,48 @@ fn long_windows_keep_head_and_tail_and_text_is_truncated() {
 fn strip_reminders_handles_unclosed_blocks() {
     assert_eq!(strip_reminders("a <system-reminder>x</system-reminder> b"), "a  b");
     assert_eq!(strip_reminders("a <system-reminder>x"), "a");
+}
+
+#[test]
+fn facts_count_tool_calls_per_utc_hour_and_desktop_host_markers() {
+    let mut t = T::default();
+    t.human("go").call("a", "Bash", json!({"command": "ls"})).result("a", false, "ok")
+        .call("b", "Bash", json!({"command": "cd x && make"}))
+        .result("b", true, "This agent is isolated in the worktree /w (synthetic); the command was rejected.")
+        .skip(3600)
+        .call("c", "Write", json!({"file_path": "/x"}))
+        .result("c", true, "PreToolUse hook did not respond before its timeout (synthetic).")
+        .call("d", "Edit", json!({})).denied("d", "interrupted", "[Tool call interrupted: synthetic]");
+    let f = facts(&t.session().events);
+    assert_eq!(f.version, FACTS_VERSION);
+    assert_eq!(f.tool_calls_by_utc_hour, [("2026-01-01T00".to_string(), 2), ("2026-01-01T01".to_string(), 2)].into());
+    assert_eq!((f.hook_timeouts, f.guard_rejections), (1, 1));
+    // A transcript with no tool calls or markers contributes nothing but its version.
+    let mut quiet = T::default();
+    quiet.human("hi").say("hello");
+    assert_eq!(facts(&quiet.session().events), Facts { version: FACTS_VERSION, ..Facts::default() });
+}
+
+#[test]
+fn a_state_written_under_an_older_facts_version_is_reprocessed_once() {
+    let root = tempfile::tempdir().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    write_corpus(root.path());
+    mine_traces(root.path(), out.path(), "", 2, &[]).unwrap();
+    let state_path = out.path().join("traces-state.json");
+    let mut state: BTreeMap<String, FileState> = serde_json::from_str(&std::fs::read_to_string(&state_path).unwrap()).unwrap();
+    assert!(state.values().all(|s| s.facts.version == FACTS_VERSION));
+    assert_eq!(state["proj/ses-1.jsonl"].facts.tool_calls_by_utc_hour.values().sum::<usize>(), 1);
+    // Older state: the facts field is missing altogether (serde default, version 0).
+    let mut old: serde_json::Value = serde_json::to_value(&state).unwrap();
+    old["proj/ses-1.jsonl"].as_object_mut().unwrap().remove("facts");
+    std::fs::write(&state_path, serde_json::to_string(&old).unwrap()).unwrap();
+    let s = mine_traces(root.path(), out.path(), "", 2, &[]).unwrap();
+    assert_eq!((s.processed, s.skipped_unchanged), (1, 1));
+    state = serde_json::from_str(&std::fs::read_to_string(&state_path).unwrap()).unwrap();
+    assert_eq!(state["proj/ses-1.jsonl"].facts.version, FACTS_VERSION);
+    let s = mine_traces(root.path(), out.path(), "", 2, &[]).unwrap();
+    assert_eq!((s.processed, s.skipped_unchanged), (0, 2));
 }
 
 #[test]
