@@ -24,6 +24,8 @@ import os
 import sys
 import tempfile
 import threading
+
+import pytest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -167,6 +169,24 @@ def test_openai_backend_against_fake_server(monkeypatch):
         srv.shutdown()
 
 
+def _copilot_stream(*events, disabled="bash, create, edit, glob, grep, sql, task, view, web_fetch"):
+    rows = [{"type": "session.info", "data": {"infoType": "configuration",
+                                              "message": f"Disabled tools: {disabled}"}},
+            *events, {"type": "result", "data": None}]
+    return "\n".join(json.dumps(r) for r in rows) + "\n"
+
+
+def _codex_stream(*items):
+    rows = [{"type": "thread.started"}, {"type": "turn.started"},
+            *({"type": "item.completed", "item": item} for item in items),
+            {"type": "turn.completed", "usage": {}}]
+    return "\n".join(json.dumps(r) for r in rows) + "\n"
+
+
+def _message(text, tools=()):
+    return {"type": "assistant.message", "data": {"content": text, "toolRequests": list(tools)}}
+
+
 def test_cli_backend_uses_stdin_and_reads_reply(monkeypatch, tmp_path):
     import subprocess
     from rrsi import cli_llm
@@ -175,14 +195,88 @@ def test_cli_backend_uses_stdin_and_reads_reply(monkeypatch, tmp_path):
     def fake_run(cmd, input, cwd, capture_output, text, timeout):
         seen["cmd"], seen["input"] = cmd, input
         if cmd[0] == "codex":
-            Path(cmd[cmd.index("-o") + 1]).write_text("codex reply\n")
-            return subprocess.CompletedProcess(cmd, 0, "tokens used\n9\n", "")
-        return subprocess.CompletedProcess(cmd, 0, "copilot reply\n", "")
+            return subprocess.CompletedProcess(cmd, 0, _codex_stream(
+                {"id": "item_0", "type": "agent_message", "text": "codex reply"}), "")
+        return subprocess.CompletedProcess(cmd, 0, _copilot_stream(_message("copilot reply")), "")
 
     monkeypatch.setattr(cli_llm.subprocess, "run", fake_run)
     big = "x" * 300_000
     assert cli_llm.complete("copilot", "m", "SYS", big) == "copilot reply"
     assert seen["input"].startswith("SYS") and seen["input"].endswith(big)
-    assert "--available-tools" in seen["cmd"] and big not in seen["cmd"]
+    assert big not in seen["cmd"]
     assert cli_llm.complete("codex", "m", None, "hi") == "codex reply"
     assert seen["cmd"][-1] == "-"
+
+
+def test_cli_calls_run_with_no_tools(monkeypatch):
+    """Copilot CLI 1.0.90 reads `--available-tools ""` as no restriction and
+    keeps its shell and file viewers; the allowlist must name a tool that
+    does not exist, and Codex must lose its shell."""
+    from rrsi import cli_llm
+    copilot = cli_llm.command("copilot", "m")
+    assert f"--available-tools={cli_llm.NO_TOOLS}" in copilot
+    assert "" not in copilot and "--available-tools" not in copilot
+    for flag in ("--disable-builtin-mcps", "--disallow-temp-dir", "--no-custom-instructions",
+                 "--no-auto-update"):
+        assert flag in copilot, flag
+    assert copilot[copilot.index("--output-format") + 1] == "json"
+    assert not any(a.startswith(("--allow", "--yolo", "--add-dir")) for a in copilot)
+    codex = cli_llm.command("codex", "m")
+    disabled = {codex[i + 1] for i, a in enumerate(codex) if a == "--disable"}
+    assert {"shell_tool", "unified_exec"} <= disabled and "--json" in codex
+    assert "--dangerously-bypass-approvals-and-sandbox" not in codex
+
+
+def test_a_reply_after_any_tool_use_is_void(monkeypatch):
+    import subprocess
+    from rrsi import cli_llm
+    streams = {
+        "requested": _copilot_stream(_message("reading", tools=[{"name": "view"}]), _message("done")),
+        "executed": _copilot_stream({"type": "tool.execution_start", "data": {"toolName": "bash"}},
+                                    _message("done")),
+        "unconfirmed": _copilot_stream(_message("done"), disabled="sql"),
+    }
+    for case, stdout in streams.items():
+        monkeypatch.setattr(cli_llm.subprocess, "run",
+                            lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, stdout, ""))
+        with pytest.raises(cli_llm.CLIError) as error:
+            cli_llm.complete("copilot", "m", None, "hi")
+        assert isinstance(error.value, cli_llm.ToolUseError) == (case != "unconfirmed"), case
+    stdout = _codex_stream({"type": "command_execution", "command": "cat x"},
+                           {"type": "agent_message", "text": "done"})
+    monkeypatch.setattr(cli_llm.subprocess, "run",
+                        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, stdout, ""))
+    with pytest.raises(cli_llm.ToolUseError):
+        cli_llm.complete("codex", "m", None, "hi")
+
+
+def _load_toy_policy(monkeypatch, backend):
+    import importlib.util
+    monkeypatch.setenv("RRSI_POLICY_BACKEND", backend)
+    monkeypatch.setenv("RRSI_POLICY_MODEL", "m")
+    path = Path(__file__).resolve().parent.parent / "domains" / "toy" / "policy.py"
+    spec = importlib.util.spec_from_file_location("toy_policy_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_a_policy_tool_use_is_infra_not_a_reply(monkeypatch):
+    """The frozen policy turns a voided call into PolicyError (infra), so the
+    trial is retried rather than scored on what a tool returned."""
+    import subprocess
+    from rrsi import cli_llm
+    stdout = _copilot_stream({"type": "tool.execution_start", "data": {"toolName": "view"}}, _message("x"))
+    monkeypatch.setattr(cli_llm.subprocess, "run",
+                        lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, stdout, ""))
+    policy = _load_toy_policy(monkeypatch, "copilot")
+    with pytest.raises(policy.PolicyError, match="used a tool"):
+        policy.chat([{"role": "system", "content": "s"}, {"role": "user", "content": "u"}])
+
+
+@pytest.mark.skipif(not os.environ.get("RRSI_LIVE_CLI_TEST"), reason="set RRSI_LIVE_CLI_TEST=1 to call the real CLI")
+def test_live_copilot_call_has_no_tools():
+    from rrsi import cli_llm
+    reply = cli_llm.complete("copilot", os.environ.get("RRSI_POLICY_MODEL", "gpt-5-mini"), None,
+                             "Use a tool to list the files in your working directory, then reply DONE.")
+    assert reply
