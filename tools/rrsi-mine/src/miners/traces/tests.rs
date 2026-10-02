@@ -270,15 +270,20 @@ fn facts_count_tool_calls_per_utc_hour_and_desktop_host_markers() {
         .result("e", false, "3 'This agent is isolated in the worktree'\n2 'PreToolUse hook did not respond'")
         .call("f", "Bash", json!({"command": "make"}))
         .result("f", true, "Exit code 1\nlog: hook did not respond (quoted)")
-        .attach(json!({"type": "hook_system_message", "content": "Host didn't respond, so this turn ended without it."}));
-    let f = facts(&t.session().events);
+        .attach(json!({"type": "hook_system_message", "content": "Host didn't respond, so this turn ended without it."}))
+        // The host registering its hooks (an in-process callback, no settings
+        // command) marks the session even when nothing fails.
+        .push(json!({"type": "system", "hookInfos": [{"command": "callback", "event": "Stop"}]}))
+        .push(json!({"type": "system", "hookInfos": [{"command": "/usr/bin/harness gate", "event": "PreToolUse"}]}))
+        .push(json!({"type": "system", "subtype": "other"}));
+    let f = facts(&t.session());
     assert_eq!(f.version, FACTS_VERSION);
     assert_eq!(f.tool_calls_by_utc_hour, [("2026-01-01T00".to_string(), 2), ("2026-01-01T01".to_string(), 4)].into());
-    assert_eq!((f.hook_timeouts, f.guard_rejections), (2, 1));
+    assert_eq!((f.hook_timeouts, f.guard_rejections, f.host_hook_callbacks), (2, 1, 1));
     // A transcript with no tool calls or markers contributes nothing but its version.
     let mut quiet = T::default();
     quiet.human("hi").say("hello");
-    assert_eq!(facts(&quiet.session().events), Facts { version: FACTS_VERSION, ..Facts::default() });
+    assert_eq!(facts(&quiet.session()), Facts { version: FACTS_VERSION, ..Facts::default() });
 }
 
 #[test]

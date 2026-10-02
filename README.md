@@ -161,8 +161,10 @@
 > session gets a denominator and a host behind one interface: tool calls from
 > the transcript, or from the CSF harness run record
 > (`~/.local/state/csf/harness/<assignment>/events.jsonl`) for sessions the
-> harness launched (`csf_harness`); a session with hook timeouts or
-> worktree-guard rejections is `desktop_hosted`, the rest `cli`. Days close at
+> harness launched (`csf_harness`); a session whose transcript shows the
+> Claude Desktop host's injected hooks (registered as callbacks, timing out,
+> or rejecting a command as its worktree guard) is `desktop_hosted`, the rest
+> `cli`. Days close at
 > 23:59:59 America/Los_Angeles: `DIR/daily/<day>.json`
 > ([`daily.schema.json`](rrsi/harness/daily.schema.json)) says whether the
 > day had ended when it was computed, `DIR/series.jsonl` carries the dashboard

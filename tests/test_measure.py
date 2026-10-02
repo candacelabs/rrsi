@@ -51,9 +51,10 @@ def episode(i: int, session: str, start: str) -> dict:
             "counts": {"span_events": 1, "tool_calls": 0, "tool_errors": 1, "human_turns": 0, "session_events": 9}}
 
 
-def facts(hours: dict, hook: int = 0, guard: int = 0) -> dict:
+def facts(hours: dict, hook: int = 0, guard: int = 0, callbacks: int = 0) -> dict:
     return {"mtime": 1, "size": 1, "hash": "h", "since": "", "episodes": 0, "events": 1,
-            "facts": {"version": 1, "tool_calls_by_utc_hour": hours, "hook_timeouts": hook, "guard_rejections": guard}}
+            "facts": {"version": 3, "tool_calls_by_utc_hour": hours, "hook_timeouts": hook, "guard_rejections": guard,
+                      "host_hook_callbacks": callbacks}}
 
 
 class VocabularyTest(unittest.TestCase):
@@ -153,28 +154,31 @@ class HostAttributionTest(unittest.TestCase):
     def test_hosts_and_denominators(self):
         transcripts = [X.SessionCalls("a", {"2026-10-01T10": 5}, hook_timeouts=2),  # markers, but harness-launched
                        X.SessionCalls("b", {"2026-10-01T10": 7}, guard_rejections=1),
-                       X.SessionCalls("c", {"2026-10-01T10": 9})]
+                       X.SessionCalls("c", {"2026-10-01T10": 9}),
+                       X.SessionCalls("e", {"2026-10-01T10": 4}, host_hook_callbacks=3)]  # Desktop, nothing failed
         harness = [X.SessionCalls("a", {"2026-10-01T10": 6}, assignment="asg-1"),
                    X.SessionCalls("d", {"2026-10-01T11": 2}, assignment="asg-2")]  # no transcript at all
         s = X.attribute(transcripts, harness)
         self.assertEqual({k: v.host for k, v in s.items()},
-                         {"a": "csf_harness", "b": "desktop_hosted", "c": "cli", "d": "csf_harness"})
+                         {"a": "csf_harness", "b": "desktop_hosted", "c": "cli", "d": "csf_harness", "e": "desktop_hosted"})
         self.assertEqual((s["a"].tool_calls, s["a"].denominator, s["a"].tool_calls_transcript, s["a"].tool_calls_harness),
                          (6, "csf_harness", 5, 6))
         self.assertEqual((s["b"].tool_calls, s["b"].denominator, s["b"].tool_calls_harness), (7, "transcript", None))
-        self.assertEqual((s["a"].hook_timeouts, s["b"].guard_rejections, s["d"].tool_calls), (2, 1, 2))
+        self.assertEqual((s["a"].hook_timeouts, s["b"].guard_rejections, s["d"].tool_calls, s["e"].host_hook_callbacks),
+                         (2, 1, 2, 3))
 
     def test_transcript_facts_fold_subagents_into_their_session(self):
         with tempfile.TemporaryDirectory() as tmp:
             state = Path(tmp) / "traces-state.json"
             state.write_text(json.dumps({
-                "proj/ses-1.jsonl": facts({"2026-10-01T10": 3}, hook=1),
+                "proj/ses-1.jsonl": facts({"2026-10-01T10": 3}, hook=1, callbacks=2),
                 "proj/ses-1/subagents/agent-1.jsonl": facts({"2026-10-01T10": 2, "2026-10-01T11": 1}, guard=1),
                 "proj/ses-2.jsonl": facts({}),
                 "legacy/old.jsonl": {"mtime": 1, "size": 1, "hash": "h", "since": "", "episodes": 0, "events": 1}}))
             got = {s.session_id: s for s in X.TranscriptCalls(state).sessions()}
             self.assertEqual(got["ses-1"].calls_by_utc_hour, {"2026-10-01T10": 5, "2026-10-01T11": 1})
-            self.assertEqual((got["ses-1"].hook_timeouts, got["ses-1"].guard_rejections), (1, 1))
+            self.assertEqual((got["ses-1"].hook_timeouts, got["ses-1"].guard_rejections, got["ses-1"].host_hook_callbacks),
+                             (1, 1, 2))
             self.assertEqual((got["ses-2"].tool_calls, got["old"].tool_calls), (0, 0))
 
     def test_harness_run_directories_count_tool_use_blocks_by_hour(self):

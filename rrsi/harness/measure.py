@@ -31,7 +31,8 @@ The procedure (observability ontology: procedure -> run -> series -> panel):
    from the CSF harness run directories (`<csf-root>/<assignment>/events.jsonl`)
    for sessions the harness launched. Host: `csf_harness` (a run directory
    names the session), else `desktop_hosted` (Claude Desktop host markers:
-   hook timeouts or worktree-guard rejections), else `cli`.
+   its injected hooks registered on the session, its hook timeouts or its
+   worktree-guard rejections), else `cli`.
 4. Days close at 23:59:59 America/Los_Angeles. Every day with a tool call or
    an episode gets `OUT/daily/<day>.json` (`daily.schema.json`; `closed`
    says whether the day had ended when it was computed, so a partial day is
@@ -114,11 +115,16 @@ class SessionCalls:
     calls_by_utc_hour: dict[str, int]
     hook_timeouts: int = 0
     guard_rejections: int = 0
+    host_hook_callbacks: int = 0
     assignment: str | None = None
 
     @property
     def tool_calls(self) -> int:
         return sum(self.calls_by_utc_hour.values())
+
+    @property
+    def desktop_markers(self) -> int:
+        return self.hook_timeouts + self.guard_rejections + self.host_hook_callbacks
 
 
 class ToolCallSource(Protocol):
@@ -148,6 +154,7 @@ class TranscriptCalls:
                 s.calls_by_utc_hour[h] = s.calls_by_utc_hour.get(h, 0) + n
             s.hook_timeouts += f.get("hook_timeouts", 0)
             s.guard_rejections += f.get("guard_rejections", 0)
+            s.host_hook_callbacks += f.get("host_hook_callbacks", 0)
         return by.values()
 
 
@@ -198,6 +205,7 @@ class Session:
     tool_calls_harness: int | None
     hook_timeouts: int
     guard_rejections: int
+    host_hook_callbacks: int
     assignment: str | None
 
     @property
@@ -214,13 +222,13 @@ def attribute(transcripts: Iterable[SessionCalls], harness: Iterable[SessionCall
     out: dict[str, Session] = {}
     for sid in sorted(set(t) | set(h)):
         ts, hs = t.get(sid), h.get(sid)
-        markers = (ts.hook_timeouts, ts.guard_rejections) if ts else (0, 0)
         if hs is not None:
             host, denom, calls = "csf_harness", "csf_harness", hs.calls_by_utc_hour
         else:
-            host, denom, calls = ("desktop_hosted" if sum(markers) else "cli"), "transcript", ts.calls_by_utc_hour
+            host, denom, calls = ("desktop_hosted" if ts.desktop_markers else "cli"), "transcript", ts.calls_by_utc_hour
         out[sid] = Session(sid, host, denom, dict(calls), ts.tool_calls if ts else 0, hs.tool_calls if hs else None,
-                           markers[0], markers[1], hs.assignment if hs else None)
+                           ts.hook_timeouts if ts else 0, ts.guard_rejections if ts else 0,
+                           ts.host_hook_callbacks if ts else 0, hs.assignment if hs else None)
     return out
 
 
@@ -497,7 +505,13 @@ def report(recs: list[DailyRecord], sessions: dict[str, Session], eps: list[Labe
         lines.append(f"| `{pat}` | " + " | ".join(cells) + " |")
     csf = [s for s in sessions.values() if s.host == "csf_harness"]
     agree = sum(min(s.tool_calls_transcript, s.tool_calls_harness or 0) for s in csf)
+    desk = [s for s in sessions.values() if s.host == "desktop_hosted"]
     lines += ["", "## Vocabulary and coverage", "",
+              f"- Hosts: a session is `csf_harness` when a harness run record names it; `desktop_hosted` when the transcript "
+              f"shows the Desktop host's injected hooks ({sum(1 for s in desk if s.host_hook_callbacks)} of {len(desk)} "
+              f"such sessions register them; {sum(1 for s in desk if s.hook_timeouts)} have hook timeouts, "
+              f"{sum(1 for s in desk if s.guard_rejections)} worktree-guard rejections); else `cli`. CSF sessions with any "
+              f"Desktop marker: {sum(1 for s in csf if s.hook_timeouts or s.guard_rejections or s.host_hook_callbacks)}.",
               f"- Raw label slugs {folding['raw_slugs']} -> {folding['canonical_ids']} canonical ids in use (+ noise); "
               f"{folding['aliases_folded']} slugs folded through aliases, {folding['uncanonical']} left uncanonical; "
               f"{folding['labels_remapped']} of {folding['labels']} labels changed name.",
