@@ -57,9 +57,10 @@ DEFAULT_OUT = Path.home() / "rrsi-private" / "harness"
 FIX_KINDS = ["claude_md_rule", "skill", "house_lint_gate", "memory", "tool_cli_fix", "doc"]
 PRIORITIES = ["P0", "P1", "P2", "P3"]
 RETRIES = 1
-#: Extra attempts, with exponential backoff, for transient failures (flaky network or proxy).
-TRANSIENT_RETRIES = 4
+#: Extra attempts, with exponential backoff capped at BACKOFF_MAX, for transient failures.
+TRANSIENT_RETRIES = 6
 BACKOFF_SECONDS = 10
+BACKOFF_MAX = 120
 
 # (backend-agnostic) system, prompt, schema, cwd -> dict
 Complete = Callable[[str, str, dict, Path], dict]
@@ -672,7 +673,7 @@ def completer(backend: str, model: str, effort: str) -> Complete:
                     (o / "llm-failures").mkdir(exist_ok=True)
                     (o / "llm-failures" / f"{time.time_ns()}.txt").write_text(str(e.args[1]))
                 if is_transient(e) and transient < TRANSIENT_RETRIES:
-                    time.sleep(BACKOFF_SECONDS * 3 ** transient)
+                    time.sleep(min(BACKOFF_MAX, BACKOFF_SECONDS * 3 ** transient))
                     transient += 1
                     continue
                 if attempt == RETRIES:

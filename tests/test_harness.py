@@ -247,6 +247,14 @@ class HarnessMinerTest(unittest.TestCase):
         self.assertNotIsInstance(ctx.exception, LLMAuthError)
         with self.assertRaises(LLMAuthError):
             llm._raise("copilot rc=1: Error: Failed to authenticate. Not logged in.")
+        dns = ("copilot rc=1: onnection: dns error: error resolving DNS: failed to lookup address information: "
+               "Temporary failure in name resolution [ENOTFOUND]\n\nCopilot could not retrieve the list of available "
+               "models.\n\nTo resolve this, try the following:\n  • Start 'copilot' and run the '/login' command to "
+               "re-authenticate")
+        with self.assertRaises(LLMError) as ctx:
+            llm._raise(dns)
+        self.assertNotIsInstance(ctx.exception, LLMAuthError)
+        self.assertTrue(llm.is_transient(dns))
         calls = {"n": 0}
 
         def flaky(backend, model, system, prompt, schema, cwd, effort):
