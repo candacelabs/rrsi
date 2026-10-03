@@ -148,6 +148,24 @@
 > tools/rrsi-mine/target/release/rrsi-mine traces --out DIR   # stage 1 only
 > ```
 >
+> **GitHub Copilot CLI sessions** (`~/.copilot/session-state/<id>/events.jsonl`)
+> go through the same miners after one projection:
+> `rrsi-mine copilot-transcripts --out T` writes each session as a Claude
+> Code transcript (`T/copilot-<cwd>/<session>.jsonl`, each subagent run as
+> `.../<session>/subagents/agent-<id>.jsonl`, brief first; `user` turns typed
+> by the operator are human, peer/scheduled/system messages are not; a `bash`
+> result with a non-zero exit code is an error, as in Claude Code), plus
+> `T/copilot-sessions.ndjson` with per-session counts (repository, client,
+> tool calls and human turns per hour). It is incremental; then pass
+> `--root T` to `harness mine` and `harness measure`. With
+> `--backend copilot`, set `COPILOT_HOME` to a private directory so the
+> labeller's own CLI calls never land in the session state being mined.
+>
+> ```bash
+> rrsi-mine copilot-transcripts --out ~/rrsi-private/transcripts
+> COPILOT_HOME=~/rrsi-private/copilot-home python -m rrsi harness mine --backend copilot --root ~/rrsi-private/transcripts
+> ```
+>
 > Output: `DIR/episodes.jsonl`, `DIR/tasks/<id>.json` + `index.json`,
 > `DIR/exam_candidates.jsonl`, `DIR/REPORT.md` (the top recurring struggles
 > with episode, session and project counts and the proposed fix).
@@ -224,18 +242,20 @@
 > personal text. Both stages refuse to write inside any git work tree; keep
 > the output (default `~/rrsi-private/harness`) out of every repository. Text
 > sent to a model is redacted first (e-mail and IP addresses, token-like
-> strings, long hex, home paths) and truncated; the SDK backend runs with no
+> strings, long hex, home paths, hostnames) and truncated; the SDK backend runs with no
 > tools, no settings and no session persistence, so the miner's own calls
-> never become transcripts it mines. This repository holds only the code and
+> never become transcripts it mines (the Copilot backend runs with no tools
+> and no custom instructions; give it its own `COPILOT_HOME`). This repository holds only the code and
 > synthetic test fixtures: no transcript text, episode or finding is ever
 > committed here.
 >
 > **Miners are plugins; write your own.** `rrsi-mine` runs any registered
 > miner: `rrsi-mine miners` lists them (name, inputs, the records each
-> writes) and `rrsi-mine <name> --key value ...` runs one. Five ship today:
+> writes) and `rrsi-mine <name> --key value ...` runs one. Six ship today:
 > `git-history` (the FAIL_TO_PASS task miner above), `slices` (FAIL_TO_PASS
 > tasks from merged slice PRs), `traces` (the struggle miner), `handoffs`
-> (cross-session coordination) and `pr-gap` (active agents without a PR). A miner is one file in
+> (cross-session coordination), `pr-gap` (active agents without a PR) and
+> `copilot-transcripts` (Copilot CLI sessions in the transcript layout the others read). A miner is one file in
 > [`tools/rrsi-mine/src/miners/`](tools/rrsi-mine/src/miners/mod.rs)
 > implementing the [`Miner`](tools/rrsi-mine/src/miner.rs) trait plus one
 > registration line; deleting both removes it. Arguments arrive as a plain

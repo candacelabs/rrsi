@@ -246,14 +246,18 @@ class HarnessMinerTest(unittest.TestCase):
 
     def test_prompts_are_redacted(self):
         eps = [episode(0, "s", "p", {"tool_error": 1},
-                       text="ssh user@example.invalid at 203.0.113.7 token=abc123 in /home/someone/x " + "a" * 40)]
+                       text="ssh user@example.invalid at 203.0.113.7 token=abc123 in /home/someone/x " + "a" * 40
+                            + " via https://proxy.corp.example.com:8080/v1 and gpu-01.lab.internal, not tests/test_x.py")]
         (self.out / "episodes.jsonl").write_text(json.dumps(eps[0]) + "\n")
         fake = FakeModel()
         self.run_mine(fake)
         sent = "\n".join(fake.prompts)
-        for leaked in ("example.invalid", "203.0.113.7", "abc123", "/home/someone", "a" * 40):
+        for leaked in ("example.invalid", "203.0.113.7", "abc123", "/home/someone", "a" * 40,
+                       "corp.example.com", "gpu-01.lab.internal"):
             self.assertNotIn(leaked, sent)
         self.assertIn("<email>", sent)
+        self.assertIn("<host>", sent)
+        self.assertIn("test_x.py", sent, "file names are not hostnames")
 
     def test_output_inside_a_work_tree_is_refused(self):
         repo = Path(self.tmp.name) / "repo"

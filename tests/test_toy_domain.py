@@ -184,5 +184,7 @@ def test_cli_backend_uses_stdin_and_reads_reply(monkeypatch, tmp_path):
     assert cli_llm.complete("copilot", "m", "SYS", big) == "copilot reply"
     assert seen["input"].startswith("SYS") and seen["input"].endswith(big)
     assert "--available-tools" in seen["cmd"] and big not in seen["cmd"]
+    # The operator's own custom instructions never steer (or bloat) a search-role call.
+    assert "--no-custom-instructions" in seen["cmd"]
     assert cli_llm.complete("codex", "m", None, "hi") == "codex reply"
     assert seen["cmd"][-1] == "-"

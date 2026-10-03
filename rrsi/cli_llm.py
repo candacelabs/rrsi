@@ -65,7 +65,7 @@ def complete(cli: str, model: str, system: str | None, prompt: str,
     with tempfile.TemporaryDirectory(prefix=f"rrsi-{cli}-") as d:
         if cli == "copilot":
             cmd = ["copilot", "-s", "--no-color", "--available-tools", "",
-                   "--disable-builtin-mcps", "--model", model,
+                   "--disable-builtin-mcps", "--no-custom-instructions", "--model", model,
                    "--reasoning-effort", REASONING]
             out_file = None
         else:

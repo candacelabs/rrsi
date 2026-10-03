@@ -116,6 +116,10 @@ REDACTIONS = [
     (re.compile(r"(?i)\b(token|password|secret|api[_-]?key)(\s*[=:]\s*)\S+"), r"\1\2<secret>"),
     (re.compile(r"\b[0-9a-f]{32,}\b"), "<hex>"),
     (re.compile(r"/home/[^/\s\"']+"), "~"),
+    # Hostnames (public and internal pseudo-TLDs); file extensions are not in the list.
+    (re.compile(r"(?i)\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+                r"(?:com|net|org|io|dev|ai|app|cloud|co|us|internal|local|lan|corp|intra|invalid|example|test)\b"),
+     "<host>"),
 ]
 
 
