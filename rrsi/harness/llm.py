@@ -44,8 +44,20 @@ class LLMAuthError(LLMError):
     """The backend is not logged in; every further call would fail the same way."""
 
 
+#: Failure text a retry can cure (a flaky network or proxy, a busy backend). The
+#: Copilot CLI's generic help mentions "re-authenticate" on such failures too, so
+#: these are checked before the auth markers.
+TRANSIENT = ("timed out", "timeout", "econnreset", "econnrefused", "socket hang up", "network error",
+             "proxy", "rate limit", "429", "502", "503", "504")
+
+
+def is_transient(e: BaseException | str) -> bool:
+    return any(t in str(e).lower() for t in TRANSIENT)
+
+
 def _raise(msg: str) -> None:
-    if "authenticat" in msg.lower() or "not logged in" in msg.lower():
+    low = msg.lower()
+    if not is_transient(low) and ("authenticat" in low or "not logged in" in low):
         raise LLMAuthError(f"{msg} (log the CLI in, or pick another --backend)")
     raise LLMError(msg)
 

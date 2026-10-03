@@ -235,6 +235,34 @@ class HarnessMinerTest(unittest.TestCase):
         self.run_mine(fake)
         self.assertEqual(fake.calls["label"], 1)
 
+    def test_a_network_timeout_is_retried_not_an_auth_failure(self):
+        # The Copilot CLI's generic troubleshooting text says "re-authenticate" even when
+        # the model catalog merely timed out behind a flaky proxy; that must not end the run.
+        from rrsi.harness import llm
+        from rrsi.harness.llm import LLMAuthError
+        timeout = ("copilot rc=1: Error: Failed to load models\n\nError: Model catalog request timed out after 30000ms\n"
+                   "  • Start 'copilot' and run the '/login' command to re-authenticate")
+        with self.assertRaises(LLMError) as ctx:
+            llm._raise(timeout)
+        self.assertNotIsInstance(ctx.exception, LLMAuthError)
+        with self.assertRaises(LLMAuthError):
+            llm._raise("copilot rc=1: Error: Failed to authenticate. Not logged in.")
+        calls = {"n": 0}
+
+        def flaky(backend, model, system, prompt, schema, cwd, effort):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                llm._raise(timeout)
+            return {"labels": []}
+
+        old = (M.complete_json, M.BACKOFF_SECONDS)
+        M.complete_json, M.BACKOFF_SECONDS = flaky, 0
+        try:
+            self.assertEqual(M.completer("copilot", "m", "low")("s", "p", {}, self.out), {"labels": []})
+        finally:
+            M.complete_json, M.BACKOFF_SECONDS = old
+        self.assertEqual(calls["n"], 3)
+
     def test_an_auth_failure_stops_the_run(self):
         from rrsi.harness.llm import LLMAuthError
 

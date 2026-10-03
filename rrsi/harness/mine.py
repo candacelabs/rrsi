@@ -48,7 +48,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable
 
-from rrsi.harness.llm import LLMAuthError, LLMError, complete_json
+from rrsi.harness.llm import LLMAuthError, LLMError, complete_json, is_transient
 from rrsi.harness.patterns import NEW_PATTERN, NOISE, Vocabulary, slug
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -57,6 +57,9 @@ DEFAULT_OUT = Path.home() / "rrsi-private" / "harness"
 FIX_KINDS = ["claude_md_rule", "skill", "house_lint_gate", "memory", "tool_cli_fix", "doc"]
 PRIORITIES = ["P0", "P1", "P2", "P3"]
 RETRIES = 1
+#: Extra attempts, with exponential backoff, for transient failures (flaky network or proxy).
+TRANSIENT_RETRIES = 4
+BACKOFF_SECONDS = 10
 
 # (backend-agnostic) system, prompt, schema, cwd -> dict
 Complete = Callable[[str, str, dict, Path], dict]
@@ -658,7 +661,8 @@ def completer(backend: str, model: str, effort: str) -> Complete:
     """The model call every stage shares: one retry for a malformed reply,
     the raw reply kept privately under OUT when it fails."""
     def complete(system, prompt, schema, o):
-        for attempt in range(RETRIES + 1):
+        attempt = transient = 0
+        while True:
             try:
                 return complete_json(backend, model, system, prompt, schema, ensure_private(o / "llm-cwd"), effort)
             except LLMAuthError:
@@ -667,8 +671,13 @@ def completer(backend: str, model: str, effort: str) -> Complete:
                 if len(e.args) > 1:
                     (o / "llm-failures").mkdir(exist_ok=True)
                     (o / "llm-failures" / f"{time.time_ns()}.txt").write_text(str(e.args[1]))
+                if is_transient(e) and transient < TRANSIENT_RETRIES:
+                    time.sleep(BACKOFF_SECONDS * 3 ** transient)
+                    transient += 1
+                    continue
                 if attempt == RETRIES:
                     raise
+                attempt += 1
     return complete
 
 
