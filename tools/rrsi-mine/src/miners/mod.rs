@@ -34,6 +34,7 @@ register! {
     handoffs => Handoffs,
     slices => Slices,
     pr_gap => PrGap,
+    copilot_transcripts => CopilotTranscripts,
 }
 
 pub fn find(name: &str) -> Option<&'static dyn Miner> {
