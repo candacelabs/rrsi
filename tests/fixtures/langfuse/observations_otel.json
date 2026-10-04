@@ -1,0 +1,132 @@
+[
+ {
+  "id": "6e000000000000a1",
+  "traceId": "2f00c0de000000000000000000000001",
+  "startTime": "2026-09-25T18:00:00.000Z",
+  "endTime": "2026-09-25T18:00:00.000Z",
+  "projectId": "copilot",
+  "parentObservationId": null,
+  "type": "AGENT",
+  "name": "invoke_agent",
+  "level": "DEFAULT",
+  "statusMessage": "",
+  "version": "",
+  "environment": "default",
+  "sessionId": "5e55a0f1-0000-4000-8000-00000000c0de",
+  "metadata": {
+   "localOnly": true,
+   "source": "github-copilot-cli",
+   "scope.name": "github.copilot.cli.langfuse.bridge",
+   "attributes.langfuse.trace.name": "copilot.cli.session",
+   "attributes.gen_ai.conversation.id": "3f00c0de-0000-4000-8000-0000000000aa",
+   "attributes.gen_ai.operation.name": "invoke_agent",
+   "attributes.gen_ai.response.finish_reasons": [
+    "length"
+   ]
+  },
+  "input": null,
+  "output": null
+ },
+ {
+  "id": "6e000000000000a2",
+  "traceId": "2f00c0de000000000000000000000001",
+  "startTime": "2026-09-25T18:00:01.000Z",
+  "endTime": "2026-09-25T18:00:01.000Z",
+  "projectId": "copilot",
+  "parentObservationId": null,
+  "type": "GENERATION",
+  "name": "chat gpt-x",
+  "level": "ERROR",
+  "statusMessage": "upstream returned 500",
+  "version": "",
+  "environment": "default",
+  "sessionId": "5e55a0f1-0000-4000-8000-00000000c0de",
+  "metadata": {
+   "localOnly": true,
+   "source": "github-copilot-cli",
+   "scope.name": "github.copilot.cli.langfuse.bridge",
+   "attributes.langfuse.trace.name": "copilot.cli.session",
+   "attributes.gen_ai.conversation.id": "3f00c0de-0000-4000-8000-0000000000aa"
+  },
+  "input": null,
+  "output": null
+ },
+ {
+  "id": "6e3f9a1c0b7d52e8",
+  "traceId": "2f00c0de000000000000000000000001",
+  "startTime": "2026-09-25T18:00:02.000Z",
+  "endTime": "2026-09-25T18:00:02.000Z",
+  "projectId": "copilot",
+  "parentObservationId": null,
+  "type": "TOOL",
+  "name": "bash",
+  "level": "ERROR",
+  "statusMessage": "exit status 1",
+  "version": "",
+  "environment": "default",
+  "sessionId": "5e55a0f1-0000-4000-8000-00000000c0de",
+  "metadata": {
+   "localOnly": true,
+   "source": "github-copilot-cli",
+   "scope.name": "github.copilot.cli.langfuse.bridge",
+   "attributes.langfuse.trace.name": "copilot.cli.session",
+   "attributes.gen_ai.conversation.id": "3f00c0de-0000-4000-8000-0000000000aa",
+   "attributes.gen_ai.operation.name": "execute_tool",
+   "attributes.gen_ai.tool.name": "bash",
+   "attributes.gen_ai.tool.call.id": "call_o1"
+  },
+  "input": null,
+  "output": null
+ },
+ {
+  "id": "6e81d4b2a9c07f13",
+  "traceId": "2f00c0de000000000000000000000001",
+  "startTime": "2026-09-25T18:00:03.000Z",
+  "endTime": "2026-09-25T18:00:03.000Z",
+  "projectId": "copilot",
+  "parentObservationId": null,
+  "type": "TOOL",
+  "name": "bash",
+  "level": "DEFAULT",
+  "statusMessage": "",
+  "version": "",
+  "environment": "default",
+  "sessionId": "5e55a0f1-0000-4000-8000-00000000c0de",
+  "metadata": {
+   "localOnly": true,
+   "source": "github-copilot-cli",
+   "scope.name": "github.copilot.cli.langfuse.bridge",
+   "attributes.langfuse.trace.name": "copilot.cli.session",
+   "attributes.gen_ai.conversation.id": "3f00c0de-0000-4000-8000-0000000000aa",
+   "attributes.gen_ai.operation.name": "execute_tool",
+   "attributes.gen_ai.tool.name": "bash",
+   "attributes.gen_ai.tool.call.id": "call_o2"
+  },
+  "input": null,
+  "output": null
+ },
+ {
+  "id": "6e000000000000a5",
+  "traceId": "2f00c0de000000000000000000000002",
+  "startTime": "2026-09-25T18:00:04.000Z",
+  "endTime": "2026-09-25T18:00:04.000Z",
+  "projectId": "copilot",
+  "parentObservationId": null,
+  "type": "SPAN",
+  "name": "permission",
+  "level": "DEFAULT",
+  "statusMessage": "",
+  "version": "",
+  "environment": "default",
+  "sessionId": "5e55a0f1-0000-4000-8000-00000000c0de",
+  "metadata": {
+   "localOnly": true,
+   "source": "github-copilot-cli",
+   "scope.name": "github.copilot.cli.langfuse.bridge",
+   "attributes.langfuse.trace.name": "copilot.cli.session",
+   "attributes.gen_ai.conversation.id": "3f00c0de-0000-4000-8000-0000000000aa"
+  },
+  "input": null,
+  "output": null
+ }
+]
