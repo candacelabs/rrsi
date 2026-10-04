@@ -367,7 +367,7 @@ class Fetch(unittest.TestCase):
     ROWS = [{"request_id": f"q{i}", "startTime": t, "metadata": {"user_api_key_alias": "a"}, "api_key": "hash-self"}
             for i, t in enumerate(["2026-09-28T10:01:00+00:00", "2026-09-28T10:05:00+00:00",
                                    "2026-09-28T10:07:00+00:00", "2026-09-28T10:40:00+00:00",
-                                   "2026-09-28T11:30:00+00:00"])]
+                                   "2026-09-28T11:31:00+00:00"])]
     CAP = 2
 
     def fake(self, calls):
@@ -433,6 +433,11 @@ class Fetch(unittest.TestCase):
                    if urllib.parse.urlparse(u).path == L.LITELLM_LOGS]
         self.assertTrue(all(q.get("status_filter") == "failure" for q in queries if q["page_size"] != "1"))
         self.assertEqual((counts["total"], written["total"]), (5, 5))
+        with tempfile.TemporaryDirectory() as d:
+            wide = L.count_litellm("http://gw", "k", datetime(2026, 9, 28, 10, tzinfo=timezone.utc),
+                                   datetime(2026, 9, 28, 12, tzinfo=timezone.utc), Path(d), get=self.fake([]),
+                                   log=lambda m: None, window=datetime(2026, 1, 2) - datetime(2026, 1, 1))
+        self.assertEqual(wide["total"], 5)
 
     def test_langfuse_pages_follow_the_cursor(self):
         pages = {"": {"data": [{"id": "o1"}], "meta": {"cursor": "c2"}},

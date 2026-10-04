@@ -859,24 +859,25 @@ def count_window(base: str, headers: dict[str, str], a: datetime, b: datetime, g
     return _n(first, "total")
 
 
-def hourly(since: datetime, until: datetime) -> list[tuple[datetime, datetime]]:
-    """[since, until) in LITELLM_WINDOW steps. Adjacent windows share their
+def windows_of(since: datetime, until: datetime, step: timedelta) -> list[tuple[datetime, datetime]]:
+    """[since, until) in `step` windows. Adjacent windows share their
     boundary second (the server's end bound is inclusive): rows are
     deduplicated by request id; a count may include a row stamped exactly on
     a boundary twice."""
     out, t = [], since
     while t < until:
-        out.append((t, min(t + LITELLM_WINDOW, until)))
-        t += LITELLM_WINDOW
+        out.append((t, min(t + step, until)))
+        t += step
     return out
 
 
 def count_litellm(base: str, key: str, since: datetime, until: datetime, raw: Path, jobs: int = 3,
-                  get: Get = http_get, log: Callable[[str], None] = print) -> dict:
+                  get: Get = http_get, log: Callable[[str], None] = print,
+                  window: timedelta = LITELLM_WINDOW) -> dict:
     """Requests of every key per window of [since, until) into raw/litellm-counts.json."""
     M.ensure_private(raw)
     headers = {"Authorization": f"Bearer {key}"}
-    windows = hourly(since, until)
+    windows = windows_of(since, until, window)
     with ThreadPoolExecutor(max(1, jobs)) as ex:
         totals = list(ex.map(lambda w: count_window(base, headers, w[0], w[1], get, log), windows))
     out = {"since": since.isoformat(), "until": until.isoformat(), "total": sum(totals),
@@ -886,7 +887,8 @@ def count_litellm(base: str, key: str, since: datetime, until: datetime, raw: Pa
 
 
 def fetch_litellm(base: str, key: str, since: datetime, until: datetime, raw: Path, scope: Scope,
-                  jobs: int = 3, get: Get = http_get, log: Callable[[str], None] = print) -> dict:
+                  jobs: int = 3, get: Get = http_get, log: Callable[[str], None] = print,
+                  window: timedelta = LITELLM_WINDOW) -> dict:
     """The scope's projected request logs of [since, until) into
     raw/litellm-<scope>.jsonl and the model groups' input limits into
     raw/litellm-models.json."""
@@ -900,7 +902,7 @@ def fetch_litellm(base: str, key: str, since: datetime, until: datetime, raw: Pa
         if isinstance(n, int):
             limits[m["model_name"]] = min(n, limits.get(m["model_name"], n))
     (raw / "litellm-models.json").write_text(json.dumps(limits, indent=1, sort_keys=True))
-    windows = hourly(since, until)
+    windows = windows_of(since, until, window)
     rows: dict[str, dict] = {}
     done = 0
     with ThreadPoolExecutor(max(1, jobs)) as ex:
@@ -998,12 +1000,14 @@ def main(argv: list[str] | None = None) -> int:
     f.add_argument("--until", required=True, help="UTC date or datetime (exclusive)")
     f.add_argument("--raw", type=Path, required=True)
     f.add_argument("--jobs", type=int, default=3)
+    f.add_argument("--window-hours", type=float, default=1.0, help="query window; sparse scopes go faster with days")
     c = sub.add_parser("count-litellm", help="gateway request totals per window (key: LITELLM_API_KEY)")
     c.add_argument("--base", required=True)
     c.add_argument("--since", required=True)
     c.add_argument("--until", required=True)
     c.add_argument("--raw", type=Path, required=True)
     c.add_argument("--jobs", type=int, default=3)
+    c.add_argument("--window-hours", type=float, default=1.0)
     g = sub.add_parser("fetch-langfuse", help="observations (keys: LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY)")
     g.add_argument("--host", required=True)
     g.add_argument("--label", required=True)
@@ -1021,10 +1025,10 @@ def main(argv: list[str] | None = None) -> int:
     log = lambda m: print(m, file=sys.stderr)  # noqa: E731
     if a.cmd == "fetch-litellm":
         r = fetch_litellm(a.base.rstrip("/"), _env("LITELLM_API_KEY"), _date(a.since), _date(a.until),
-                          a.raw, a.scope, a.jobs, log=log)
+                          a.raw, a.scope, a.jobs, log=log, window=timedelta(hours=a.window_hours))
     elif a.cmd == "count-litellm":
         r = count_litellm(a.base.rstrip("/"), _env("LITELLM_API_KEY"), _date(a.since), _date(a.until),
-                          a.raw, a.jobs, log=log)
+                          a.raw, a.jobs, log=log, window=timedelta(hours=a.window_hours))
     elif a.cmd == "fetch-langfuse":
         r = fetch_langfuse(a.host.rstrip("/"), _env("LANGFUSE_PUBLIC_KEY"), _env("LANGFUSE_SECRET_KEY"),
                            a.label, a.raw, log=log)
