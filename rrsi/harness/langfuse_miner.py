@@ -941,8 +941,11 @@ def read_jsonl(p: Path) -> list[dict]:
     return [json.loads(l) for l in p.read_text().splitlines() if l.strip() != ""]
 
 
-def mine_raw(raw: Path, out: Path, work: Path, exe: Path, gateway_label: str) -> dict:
-    """Every source in raw/ -> episodes in `out` and their summary next to it."""
+def mine_raw(raw: Path, out: Path, work: Path, exe: Path, gateway_label: str,
+             exclude: list[str] | tuple[str, ...] = ()) -> dict:
+    """Every source in raw/ -> episodes in `out` and their summary next to it.
+    Langfuse sessions whose id contains an `exclude` substring are dropped
+    (synthetic fixtures, the experiment's own sessions)."""
     M.ensure_private(out.parent)
     eps: list[dict] = []
     observations: dict[str, int] = {}
@@ -963,7 +966,7 @@ def mine_raw(raw: Path, out: Path, work: Path, exe: Path, gateway_label: str) ->
         eps += litellm_episodes(others, limits, project, complete=False)
     for p in sorted(raw.glob("langfuse-*.jsonl")):
         label = p.stem.removeprefix("langfuse-")
-        obs = dedupe(read_jsonl(p))
+        obs = [o for o in dedupe(read_jsonl(p)) if not any(x != "" and x in session_of(o) for x in exclude)]
         observations[f"langfuse-{label}"] = len(obs)
         eps += langfuse_episodes(obs, label)
         t_eps, miner[label] = traces_episodes(obs, label, work / label, exe)
@@ -1011,6 +1014,7 @@ def main(argv: list[str] | None = None) -> int:
     e.add_argument("--work", type=Path, help="private work dir (default: <out>.work)")
     e.add_argument("--rrsi-mine", type=Path, help="rrsi-mine binary (default: build this checkout's)")
     e.add_argument("--gateway-label", default="gateway")
+    e.add_argument("--exclude", action="append", default=[], help="drop Langfuse sessions whose id contains this")
     t = sub.add_parser("table", help="ranked markdown table from a summary")
     t.add_argument("--summary", type=Path, required=True)
     a = ap.parse_args(argv)
@@ -1027,7 +1031,7 @@ def main(argv: list[str] | None = None) -> int:
     elif a.cmd == "episodes":
         exe = a.rrsi_mine if a.rrsi_mine is not None else M.rust_binary()
         work = a.work if a.work is not None else a.out.with_suffix(".work")
-        r = mine_raw(a.raw, a.out, work, exe, a.gateway_label)
+        r = mine_raw(a.raw, a.out, work, exe, a.gateway_label, a.exclude)
     else:
         print(table(ranked(json.loads(a.summary.read_text())["sources"])))
         return 0

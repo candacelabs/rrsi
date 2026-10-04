@@ -316,6 +316,17 @@ class EndToEnd(unittest.TestCase):
                          {"model_access_denied": {"episodes": 1, "hits": 2, "examples": ["b1-selftest"]},
                           "auth_error": {"episodes": 1, "hits": 1, "examples": ["b3-authfail"]}})
 
+    def test_excluded_sessions_leave_no_trace(self):
+        with tempfile.TemporaryDirectory() as d:
+            raw = Path(d) / "raw"
+            raw.mkdir()
+            (raw / "langfuse-copilot.jsonl").write_text(
+                "".join(json.dumps(o) + "\n" for o in projected_obs("observations_bridge.json")))
+            out = Path(d) / "out" / "episodes.jsonl"
+            summary = L.mine_raw(raw, out, Path(d) / "work", EXE, "b300", exclude=["00000000c0de"])
+            self.assertEqual(out.read_text(), "")
+        self.assertEqual(summary["sources"]["langfuse-copilot"], {"observations": 0, "episodes": 0, "classes": {}})
+
     def test_injected_text_is_not_an_operator_turn(self):
         obs = [{"id": f"o{i}", "traceId": "t1", "sessionId": "s1", "type": typ, "name": name, "level": "DEFAULT",
                 "statusMessage": sm, "startTime": f"2026-09-05T10:00:0{i}Z", "parent": "",
