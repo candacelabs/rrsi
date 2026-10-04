@@ -154,6 +154,13 @@ class GatewayDetectors(unittest.TestCase):
         ok = req("o", "2026-09-28T10:00:00+00:00", pt=50000)
         self.assertNotIn(1, L.gateway_hits([ok, req("x", "2026-09-28T10:00:30+00:00", pt=50000)], LIMITS))
 
+    def test_a_failures_only_stream_infers_no_retries(self):
+        a = req("f1", "2026-09-28T10:00:00+00:00", status="failure", code="403", error="not allowed to access model")
+        b = req("f2", "2026-09-28T10:01:00+00:00", status="failure", code="403", error="not allowed to access model")
+        self.assertEqual(L.gateway_hits([a, b], LIMITS, complete=False),
+                         {0: [S.MODEL_ACCESS_DENIED], 1: [S.MODEL_ACCESS_DENIED]})
+        self.assertIn(S.LLM_RETRY, L.gateway_hits([a, b], LIMITS, complete=True)[1])
+
     def test_context_pressure_is_relative_to_the_model_limit(self):
         at = int(L.CONTEXT_PRESSURE * LIMITS["fast"]) + 1
         cases = [("at the threshold", req("x", "2026-09-28T10:00:00+00:00", pt=at), True),
@@ -164,7 +171,7 @@ class GatewayDetectors(unittest.TestCase):
                 self.assertEqual(S.CONTEXT_PRESSURE in L.gateway_hits([r], LIMITS).get(0, []), want)
 
     def test_episodes_merge_one_burst_per_session(self):
-        eps = L.litellm_episodes(projected_rows(), LIMITS, "b300")
+        eps = L.litellm_episodes(projected_rows(), LIMITS, "litellm-b300")
         sig = {e["refs"][0]: e["signals"] for e in eps}
         self.assertEqual(sig, {
             "chatcmpl-a2": {"context_overflow": 1, "context_pressure": 1, "empty_completion": 1,
@@ -225,12 +232,22 @@ class LangfuseSessions(unittest.TestCase):
         results = [b for l in lines[""] for b in (l["message"]["content"] if isinstance(l["message"]["content"], list) else [])
                    if b["type"] == "tool_result"]
         self.assertEqual([(b["tool_use_id"], b["is_error"]) for b in results], [("call_c1", True), ("call_c2", False)])
-        humans = [l for l in lines[""] if l.get("origin", {}).get("kind") == "human"]
-        self.assertEqual(len(humans), 2)
+        # The bridge drops a message's source: rrsi-mine's plain-prompt rule decides, as for Copilot
+        # messages without one.
+        users = [l for l in lines[""] if l["type"] == "user" and isinstance(l["message"]["content"], str)]
+        self.assertEqual([l.get("origin") for l in users], [None, None])
         self.assertTrue(all(l["isSidechain"] is True for l in lines["call_task1"]))
         inputs = [b["input"] for l in lines[""] for b in (l["message"]["content"] if isinstance(l["message"]["content"], list) else [])
                   if b["type"] == "tool_use"]
         self.assertEqual(len({json.dumps(i) for i in inputs}), len(inputs))
+
+    def test_exported_message_text_is_redacted(self):
+        o = L.project_langfuse({"id": "o1", "traceId": "t", "type": "EVENT", "name": "copilot.message:user",
+                                "startTime": "2026-09-05T10:00:00Z", "metadata": {},
+                                "input": "LANGFUSE_PUBLIC_KEY=pk-lf-1234abcd-0000-4000 LANGFUSE_SECRET_KEY="
+                                         "sk-lf-9999ffff-1111-4000 see /home/someone/notes and gw.example.corp"})
+        for leak in ("pk-lf-1234abcd", "sk-lf-9999ffff", "someone", "gw.example.corp"):
+            self.assertNotIn(leak, o["input"])
 
     def test_a_failed_call_is_read_from_the_success_flag_or_the_level(self):
         def complete(level, md):
@@ -264,7 +281,11 @@ class EndToEnd(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             raw = Path(d) / "raw"
             raw.mkdir()
-            (raw / "litellm.jsonl").write_text("".join(json.dumps(r) + "\n" for r in projected_rows()))
+            rows = projected_rows()
+            (raw / "litellm-self.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows if r["key"] == "self"))
+            (raw / "litellm-failures.jsonl").write_text(
+                "".join(json.dumps(r) + "\n" for r in rows if r["status"] == L.FAILURE))
+            (raw / "litellm-counts.json").write_text(json.dumps({"total": len(rows)}))
             (raw / "litellm-models.json").write_text(json.dumps(LIMITS))
             for name, label in (("observations_bridge.json", "copilot"), ("observations_otel.json", "csf")):
                 (raw / f"langfuse-{label}.jsonl").write_text(
@@ -278,13 +299,31 @@ class EndToEnd(unittest.TestCase):
                                   ("langfuse-copilot", True): {"tool_error": 1},
                                   ("langfuse-csf", False): {"tool_error": 1}})
         rust = next(e for e in eps if e["project"] == "langfuse-copilot" and not e["file"].endswith(".generations"))
-        ours = next(e for e in eps if e["project"] == "litellm-b300")
+        ours = next(e for e in eps if e["project"] == "litellm-b300-self")
         self.assertEqual(set(rust), set(ours))
         self.assertEqual(set(rust["counts"]), set(ours["counts"]))
         src = summary["sources"]
         self.assertEqual(src["langfuse-copilot"]["observations"], 13)
-        self.assertEqual(src["litellm-b300"]["classes"]["llm_retry"], {"episodes": 2, "hits": 3,
-                                                                       "examples": ["b2-selftest", "chatcmpl-a3"]})
+        self.assertEqual((src["litellm-b300-self"]["observations"], src["litellm-b300-others"]["observations"]), (7, 3))
+        self.assertEqual(src["litellm-b300-self"]["classes"]["llm_retry"],
+                         {"episodes": 1, "hits": 1, "examples": ["chatcmpl-a3"]})
+        self.assertEqual(src["litellm-b300-others"]["classes"],
+                         {"model_access_denied": {"episodes": 1, "hits": 2, "examples": ["b1-selftest"]},
+                          "auth_error": {"episodes": 1, "hits": 1, "examples": ["b3-authfail"]}})
+
+    def test_injected_text_is_not_an_operator_turn(self):
+        obs = [{"id": f"o{i}", "traceId": "t1", "sessionId": "s1", "type": typ, "name": name, "level": "DEFAULT",
+                "statusMessage": sm, "startTime": f"2026-09-05T10:00:0{i}Z", "parent": "",
+                "metadata": md, **io} for i, (typ, name, sm, md, io) in enumerate([
+                    ("TOOL", "copilot.tool:bash", "", {"toolCallId": "c1", "toolName": "bash"}, {}),
+                    ("EVENT", "copilot.tool.complete", "success", {"toolCallId": "c1", "success": True}, {}),
+                    ("EVENT", "copilot.message:user", "", {}, {"input": "[Scheduled check] no output yet"}),
+                    ("EVENT", "copilot.message:assistant", "", {}, {"output": "Checking the build again."}),
+                    ("EVENT", "copilot.message:user", "", {}, {"input": "no, wrong file"})])]
+        with tempfile.TemporaryDirectory() as d:
+            eps, _ = L.traces_episodes(obs, "x", Path(d), EXE)
+        self.assertEqual([e["signals"] for e in eps], [{"user_correction": 1}])
+        self.assertEqual([c["text"] for c in eps[0]["context"] if "signals" in c], ["no, wrong file"])
 
 
 class Ranking(unittest.TestCase):
@@ -328,7 +367,9 @@ class Fetch(unittest.TestCase):
             q = dict(urllib.parse.parse_qsl(u.query))
             a = datetime.strptime(q["start_date"], L.LITELLM_DATE).replace(tzinfo=timezone.utc)
             b = datetime.strptime(q["end_date"], L.LITELLM_DATE).replace(tzinfo=timezone.utc)
-            rows = [r for r in self.ROWS if a <= datetime.fromisoformat(r["startTime"]) <= b]
+            rows = [r for r in self.ROWS if a <= datetime.fromisoformat(r["startTime"]) <= b
+                    and q.get("api_key", r["api_key"]) == r["api_key"]
+                    and q.get("status_filter", r.get("status", "success")) == r.get("status", "success")]
             size, page = int(q["page_size"]), int(q["page"])
             capped = len(rows) > self.CAP
             pages = -(-len(rows) // size)
@@ -343,11 +384,12 @@ class Fetch(unittest.TestCase):
             L.LITELLM_PAGE = 1
             try:
                 r = L.fetch_litellm("http://gw", "sk-secret-key", datetime(2026, 9, 28, 10, tzinfo=timezone.utc),
-                                    datetime(2026, 9, 28, 12, tzinfo=timezone.utc), Path(d) / "raw", jobs=2,
-                                    get=self.fake(calls), log=logs.append)
+                                    datetime(2026, 9, 28, 12, tzinfo=timezone.utc), Path(d) / "raw", L.Scope.SELF,
+                                    jobs=2, get=self.fake(calls), log=logs.append)
             finally:
                 L.LITELLM_PAGE = old
-            got = [json.loads(l)["request_id"] for l in (Path(d) / "raw" / "litellm.jsonl").read_text().splitlines()]
+            got = [json.loads(l)["request_id"] for l in
+                   (Path(d) / "raw" / "litellm-self.jsonl").read_text().splitlines()]
             limits = json.loads((Path(d) / "raw" / "litellm-models.json").read_text())
         self.assertEqual(got, ["q0", "q1", "q2", "q3", "q4"])
         self.assertEqual(r["requests"], 5)
@@ -355,6 +397,26 @@ class Fetch(unittest.TestCase):
         self.assertTrue(any("capped" in m for m in logs))
         self.assertTrue(all("sk-secret-key" not in u for u, _ in calls))
         self.assertTrue(all("sk-secret-key" not in m for m in logs))
+        logs_queries = [dict(urllib.parse.parse_qsl(urllib.parse.urlparse(u).query)) for u, _ in calls
+                        if urllib.parse.urlparse(u).path == L.LITELLM_LOGS]
+        self.assertTrue(all(q["api_key"] == "hash-self" and "status_filter" not in q for q in logs_queries))
+
+    def test_failure_scope_and_counts(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as d:
+            raw = Path(d) / "raw"
+            L.fetch_litellm("http://gw", "k", datetime(2026, 9, 28, 10, tzinfo=timezone.utc),
+                            datetime(2026, 9, 28, 12, tzinfo=timezone.utc), raw, L.Scope.FAILURES,
+                            get=self.fake(calls), log=lambda m: None)
+            counts = L.count_litellm("http://gw", "k", datetime(2026, 9, 28, 10, tzinfo=timezone.utc),
+                                     datetime(2026, 9, 28, 12, tzinfo=timezone.utc), raw,
+                                     get=self.fake(calls), log=lambda m: None)
+            written = json.loads((raw / "litellm-counts.json").read_text())
+            self.assertTrue((raw / "litellm-failures.jsonl").exists())
+        queries = [dict(urllib.parse.parse_qsl(urllib.parse.urlparse(u).query)) for u, _ in calls
+                   if urllib.parse.urlparse(u).path == L.LITELLM_LOGS]
+        self.assertTrue(all(q.get("status_filter") == "failure" for q in queries if q["page_size"] != "1"))
+        self.assertEqual((counts["total"], written["total"]), (5, 5))
 
     def test_langfuse_pages_follow_the_cursor(self):
         pages = {"": {"data": [{"id": "o1"}], "meta": {"cursor": "c2"}},
