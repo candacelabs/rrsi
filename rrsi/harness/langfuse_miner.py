@@ -30,9 +30,13 @@ Two read-only sources:
   grouped into streams (key, client, model group), split into sessions at
   idle gaps and UTC days, and the gateway classes (failures by kind, a client
   re-sending a failed request, router retries, context pressure, empty
-  completions, slow first tokens) are detected here.
+  completions, slow first tokens) are detected here. A busy gateway logs more
+  than a crawl can page through, so the crawl is scoped: every request of our
+  own key (complete streams, every class), the failed requests of every key
+  (failure kinds only), and per-window request totals (the denominator).
 
-    python -m rrsi.harness.langfuse_miner fetch-litellm --base URL --since 2026-09-15 --until 2026-10-05 --raw DIR
+    python -m rrsi.harness.langfuse_miner fetch-litellm --scope self|failures --base URL --since D --until D --raw DIR
+    python -m rrsi.harness.langfuse_miner count-litellm --base URL --since 2026-09-15 --until 2026-10-05 --raw DIR
     python -m rrsi.harness.langfuse_miner fetch-langfuse --host URL --label NAME --raw DIR
     python -m rrsi.harness.langfuse_miner episodes --raw DIR --out EPISODES.jsonl
     python -m rrsi.harness.langfuse_miner table --summary EPISODES.summary.json
@@ -348,7 +352,10 @@ def same_request(prev: dict, r: dict) -> bool:
     return abs(a - b) <= RETRY_TOKEN_TOLERANCE * max(a, b)
 
 
-def gateway_hits(rs: list[dict], max_input: dict[str, int]) -> dict[int, list[Signal]]:
+def gateway_hits(rs: list[dict], max_input: dict[str, int], complete: bool = True) -> dict[int, list[Signal]]:
+    """Hits per request index. Retries are inferred only from a complete
+    stream: in a failures-only stream the previous row is not the previous
+    request."""
     hits: dict[int, list[Signal]] = defaultdict(list)
     for i, r in enumerate(rs):
         start = parse_ts(r["start"])
@@ -364,7 +371,7 @@ def gateway_hits(rs: list[dict], max_input: dict[str, int]) -> dict[int, list[Si
                 hits[i].append(Signal.SLOW_FIRST_TOKEN)
         if r["attempted_retries"] > 0:
             hits[i].append(Signal.GATEWAY_RETRY)
-        if i > 0:
+        if complete and i > 0:
             prev = rs[i - 1]
             if prev["status"] == FAILURE and start - parse_ts(prev["start"]) <= RETRY_WINDOW \
                     and same_request(prev, r):
@@ -385,14 +392,15 @@ def gateway_event(r: dict) -> Ev:
               is_error=r["status"] == FAILURE, call=True)
 
 
-def litellm_episodes(records: list[dict], max_input: dict[str, int], label: str) -> list[dict]:
+def litellm_episodes(records: list[dict], max_input: dict[str, int], project: str,
+                     complete: bool = True) -> list[dict]:
     out = []
     for rs in gateway_sessions(records):
         key, client, group = stream_key(rs[0])
         stream = f"{key}/{_dash(client)}/{_dash(group)}"
-        out += assemble([gateway_event(r) for r in rs], gateway_hits(rs, max_input),
-                        project=f"litellm-{label}", session_id=f"{stream}/{rs[0]['request_id']}",
-                        file=f"litellm-{label}/{stream}/{rs[0]['start']}")
+        out += assemble([gateway_event(r) for r in rs], gateway_hits(rs, max_input, complete),
+                        project=project, session_id=f"{stream}/{rs[0]['request_id']}",
+                        file=f"{project}/{stream}/{rs[0]['start']}")
     return out
 
 
@@ -406,6 +414,12 @@ LANGFUSE_METADATA = (
     "attributes.gen_ai.operation.name", "attributes.gen_ai.response.finish_reasons", "attributes.error.type",
 )
 MESSAGE_MAX = 4000
+LANGFUSE_KEY = re.compile(r"\b[ps]k-lf-[0-9A-Fa-f-]{8,}")
+
+
+def redact(text: str) -> str:
+    """rrsi's redaction plus Langfuse project keys pasted into a conversation."""
+    return M.redact(LANGFUSE_KEY.sub("<secret>", text))
 
 
 def project_langfuse(o: dict) -> dict:
@@ -413,10 +427,10 @@ def project_langfuse(o: dict) -> dict:
     output only when they are message text."""
     md = _d(o, "metadata")
     keep = {k: md[k] for k in LANGFUSE_METADATA if k in md}
-    io = {k: o[k][:MESSAGE_MAX] for k in ("input", "output") if isinstance(o.get(k), str)}
+    io = {k: redact(o[k])[:MESSAGE_MAX] for k in ("input", "output") if isinstance(o.get(k), str)}
     return {"id": _s(o, "id"), "traceId": _s(o, "traceId"), "sessionId": _s(o, "sessionId"),
             "type": _s(o, "type"), "name": _s(o, "name"), "level": _s(o, "level"),
-            "statusMessage": _s(o, "statusMessage"), "startTime": _s(o, "startTime"),
+            "statusMessage": redact(_s(o, "statusMessage")), "startTime": _s(o, "startTime"),
             "parent": _s(o, "parentObservationId"), "metadata": keep, **io}
 
 
@@ -504,8 +518,12 @@ def transcript_lines(obs: list[dict]) -> dict[str, list[dict]]:
         if agent != "":
             base |= {"isSidechain": True, "agentId": agent}
         if kind == "human":
-            origin = "system" if agent != "" else "human"
-            line = {"type": "user", "origin": {"kind": origin}, "message": {"content": o.get("input", "")}}
+            # The export drops the message's source (operator, peer agent,
+            # schedule): rrsi-mine's plain-prompt rule decides, as it does for
+            # Copilot messages without one. A subagent's messages are briefs.
+            line = {"type": "user", "message": {"content": o.get("input", "")}}
+            if agent != "":
+                line["origin"] = {"kind": "system"}
         elif kind == "assistant":
             line = {"type": "assistant", "message": {"content": [{"type": "text", "text": o.get("output", "")}]}}
         elif kind == "tool_use":
@@ -734,6 +752,15 @@ LANGFUSE_FIELDS = "core,basic,time,io,metadata,model,usage"
 Get = Callable[[str, dict[str, str]], dict]
 
 
+class Scope(str, Enum):
+    """What a crawl of the gateway's request logs pages through."""
+
+    #: Every request of the caller's own key: complete streams.
+    SELF = "self"
+    #: The failed requests of every key.
+    FAILURES = "failures"
+
+
 def http_get(url: str, headers: dict[str, str]) -> dict:
     """GET JSON; transient failures (timeouts, 429, 5xx) are retried with backoff."""
     last: Exception | None = None
@@ -753,59 +780,99 @@ def http_get(url: str, headers: dict[str, str]) -> dict:
     raise last
 
 
-def _window_url(base: str, a: datetime, b: datetime, page: int) -> str:
+def _window_url(base: str, a: datetime, b: datetime, page: int, extra: dict[str, str],
+                size: int = 0) -> str:
     q = urllib.parse.urlencode({"start_date": a.strftime(LITELLM_DATE), "end_date": b.strftime(LITELLM_DATE),
-                                "page": page, "page_size": LITELLM_PAGE,
-                                "exclude_internal_health_checks": "true"})
+                                "page": page, "page_size": LITELLM_PAGE if size == 0 else size,
+                                "exclude_internal_health_checks": "true", **extra})
     return f"{base}{LITELLM_LOGS}?{q}"
 
 
+def _split(a: datetime, b: datetime) -> list[tuple[datetime, datetime]]:
+    step = (b - a) / LITELLM_SPLIT
+    return [(a + k * step, a + (k + 1) * step) for k in range(LITELLM_SPLIT)]
+
+
 def fetch_window(base: str, headers: dict[str, str], a: datetime, b: datetime, get: Get,
-                 log: Callable[[str], None]) -> list[dict]:
+                 log: Callable[[str], None], extra: dict[str, str]) -> list[dict]:
     """Every row of [a, b]; a window the server caps is split, never truncated."""
-    first = get(_window_url(base, a, b, 1), headers)
+    first = get(_window_url(base, a, b, 1, extra), headers)
     if first.get("total_is_capped") is True:
         if b - a > LITELLM_MIN_WINDOW:
-            step = (b - a) / LITELLM_SPLIT
             log(f"[litellm] {a:%m-%d %H:%M:%S}..{b:%H:%M:%S} capped; split in {LITELLM_SPLIT}")
-            return [r for k in range(LITELLM_SPLIT)
-                    for r in fetch_window(base, headers, a + k * step, a + (k + 1) * step, get, log)]
+            return [r for x, y in _split(a, b) for r in fetch_window(base, headers, x, y, get, log, extra)]
         log(f"[litellm] WARNING {a:%m-%d %H:%M:%S}..{b:%H:%M:%S} capped at the minimum window: rows are missing")
     rows = list(first.get("data", []))
     for page in range(2, _n(first, "total_pages") + 1):
-        rows += get(_window_url(base, a, b, page), headers).get("data", [])
+        rows += get(_window_url(base, a, b, page, extra), headers).get("data", [])
     return rows
 
 
-def fetch_litellm(base: str, key: str, since: datetime, until: datetime, raw: Path, jobs: int = 3,
+def count_window(base: str, headers: dict[str, str], a: datetime, b: datetime, get: Get,
+                 log: Callable[[str], None]) -> int:
+    """Requests of every key in [a, b]; a capped count is split."""
+    first = get(_window_url(base, a, b, 1, {}, size=1), headers)
+    if first.get("total_is_capped") is True:
+        if b - a > LITELLM_MIN_WINDOW:
+            return sum(count_window(base, headers, x, y, get, log) for x, y in _split(a, b))
+        log(f"[litellm] WARNING {a:%m-%d %H:%M:%S}..{b:%H:%M:%S} count capped at the minimum window")
+    return _n(first, "total")
+
+
+def hourly(since: datetime, until: datetime) -> list[tuple[datetime, datetime]]:
+    """[since, until) in LITELLM_WINDOW steps. Adjacent windows share their
+    boundary second (the server's end bound is inclusive): rows are
+    deduplicated by request id; a count may include a row stamped exactly on
+    a boundary twice."""
+    out, t = [], since
+    while t < until:
+        out.append((t, min(t + LITELLM_WINDOW, until)))
+        t += LITELLM_WINDOW
+    return out
+
+
+def count_litellm(base: str, key: str, since: datetime, until: datetime, raw: Path, jobs: int = 3,
                   get: Get = http_get, log: Callable[[str], None] = print) -> dict:
-    """Projected request logs of [since, until) into raw/litellm.jsonl and the
-    model groups' input limits into raw/litellm-models.json."""
+    """Requests of every key per window of [since, until) into raw/litellm-counts.json."""
+    M.ensure_private(raw)
+    headers = {"Authorization": f"Bearer {key}"}
+    windows = hourly(since, until)
+    with ThreadPoolExecutor(max(1, jobs)) as ex:
+        totals = list(ex.map(lambda w: count_window(base, headers, w[0], w[1], get, log), windows))
+    out = {"since": since.isoformat(), "until": until.isoformat(), "total": sum(totals),
+           "windows": {a.isoformat(): n for (a, _), n in zip(windows, totals)}}
+    (raw / "litellm-counts.json").write_text(json.dumps(out, indent=1))
+    return {k: out[k] for k in ("since", "until", "total")}
+
+
+def fetch_litellm(base: str, key: str, since: datetime, until: datetime, raw: Path, scope: Scope,
+                  jobs: int = 3, get: Get = http_get, log: Callable[[str], None] = print) -> dict:
+    """The scope's projected request logs of [since, until) into
+    raw/litellm-<scope>.jsonl and the model groups' input limits into
+    raw/litellm-models.json."""
     M.ensure_private(raw)
     headers = {"Authorization": f"Bearer {key}"}
     self_key = _s(get(f"{base}/key/info", headers), "key")
+    extra = {"api_key": self_key} if scope == Scope.SELF else {"status_filter": FAILURE}
     limits: dict[str, int] = {}
     for m in get(f"{base}/model/info", headers).get("data", []):
         n = _d(m, "model_info").get("max_input_tokens")
         if isinstance(n, int):
             limits[m["model_name"]] = min(n, limits.get(m["model_name"], n))
     (raw / "litellm-models.json").write_text(json.dumps(limits, indent=1, sort_keys=True))
-    # Windows overlap at their shared second (the server's end bound is
-    # inclusive); rows are deduplicated by request id.
-    windows = []
-    t = since
-    while t < until:
-        windows.append((t, min(t + LITELLM_WINDOW, until)))
-        t += LITELLM_WINDOW
+    windows = hourly(since, until)
     rows: dict[str, dict] = {}
+    done = 0
     with ThreadPoolExecutor(max(1, jobs)) as ex:
-        for got in ex.map(lambda w: fetch_window(base, headers, w[0], w[1], get, log), windows):
+        for got in ex.map(lambda w: fetch_window(base, headers, w[0], w[1], get, log, extra), windows):
             for rec in got:
                 p = project_litellm(rec, self_key)
                 rows[p["request_id"]] = p
+            done += 1
+            log(f"[litellm {scope.value}] {done}/{len(windows)} windows, {len(rows)} rows")
     ordered = sorted(rows.values(), key=lambda r: (r["start"], r["request_id"]))
-    (raw / "litellm.jsonl").write_text("".join(json.dumps(r) + "\n" for r in ordered))
-    return {"requests": len(ordered), "windows": len(windows), "model_groups": limits}
+    (raw / f"litellm-{scope.value}.jsonl").write_text("".join(json.dumps(r) + "\n" for r in ordered))
+    return {"scope": scope.value, "requests": len(ordered), "windows": len(windows), "model_groups": limits}
 
 
 def fetch_langfuse(host: str, public: str, secret: str, label: str, raw: Path, get: Get = http_get,
@@ -840,12 +907,20 @@ def mine_raw(raw: Path, out: Path, work: Path, exe: Path, gateway_label: str) ->
     eps: list[dict] = []
     observations: dict[str, int] = {}
     miner: dict[str, dict] = {}
-    logs = raw / "litellm.jsonl"
-    if logs.exists():
-        records = read_jsonl(logs)
-        limits = json.loads((raw / "litellm-models.json").read_text())
-        observations[f"litellm-{gateway_label}"] = len(records)
-        eps += litellm_episodes(records, limits, gateway_label)
+    models, own, failed, counts = (raw / f for f in ("litellm-models.json", "litellm-self.jsonl",
+                                                       "litellm-failures.jsonl", "litellm-counts.json"))
+    limits = json.loads(models.read_text()) if models.exists() else {}
+    own_rows = read_jsonl(own) if own.exists() else []
+    if own.exists():
+        project = f"litellm-{gateway_label}-self"
+        observations[project] = len(own_rows)
+        eps += litellm_episodes(own_rows, limits, project, complete=True)
+    if failed.exists():
+        project = f"litellm-{gateway_label}-others"
+        total = json.loads(counts.read_text())["total"] if counts.exists() else len(own_rows)
+        observations[project] = total - len(own_rows)
+        others = [r for r in read_jsonl(failed) if r["key"] != SELF_KEY]
+        eps += litellm_episodes(others, limits, project, complete=False)
     for p in sorted(raw.glob("langfuse-*.jsonl")):
         label = p.stem.removeprefix("langfuse-")
         obs = dedupe(read_jsonl(p))
@@ -874,11 +949,18 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m rrsi.harness.langfuse_miner", description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     f = sub.add_parser("fetch-litellm", help="gateway request logs (key: LITELLM_API_KEY)")
+    f.add_argument("--scope", type=Scope, choices=list(Scope), required=True)
     f.add_argument("--base", required=True)
     f.add_argument("--since", required=True, help="UTC date or datetime")
     f.add_argument("--until", required=True, help="UTC date or datetime (exclusive)")
     f.add_argument("--raw", type=Path, required=True)
     f.add_argument("--jobs", type=int, default=3)
+    c = sub.add_parser("count-litellm", help="gateway request totals per window (key: LITELLM_API_KEY)")
+    c.add_argument("--base", required=True)
+    c.add_argument("--since", required=True)
+    c.add_argument("--until", required=True)
+    c.add_argument("--raw", type=Path, required=True)
+    c.add_argument("--jobs", type=int, default=3)
     g = sub.add_parser("fetch-langfuse", help="observations (keys: LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY)")
     g.add_argument("--host", required=True)
     g.add_argument("--label", required=True)
@@ -895,6 +977,9 @@ def main(argv: list[str] | None = None) -> int:
     log = lambda m: print(m, file=sys.stderr)  # noqa: E731
     if a.cmd == "fetch-litellm":
         r = fetch_litellm(a.base.rstrip("/"), _env("LITELLM_API_KEY"), _date(a.since), _date(a.until),
+                          a.raw, a.scope, a.jobs, log=log)
+    elif a.cmd == "count-litellm":
+        r = count_litellm(a.base.rstrip("/"), _env("LITELLM_API_KEY"), _date(a.since), _date(a.until),
                           a.raw, a.jobs, log=log)
     elif a.cmd == "fetch-langfuse":
         r = fetch_langfuse(a.host.rstrip("/"), _env("LANGFUSE_PUBLIC_KEY"), _env("LANGFUSE_SECRET_KEY"),
