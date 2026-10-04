@@ -170,6 +170,32 @@
 > `DIR/exam_candidates.jsonl`, `DIR/REPORT.md` (the top recurring struggles
 > with episode, session and project counts and the proposed fix).
 >
+> **LLM telemetry: Langfuse traces and LiteLLM gateway logs.**
+> `python -m rrsi.harness.langfuse_miner` turns two read-only telemetry
+> sources into episodes of the same schema (plus `refs` and per-class
+> `examples` ids). Langfuse observations (public API v2, so v4 events-only
+> deployments work) of Copilot CLI sessions, from the local session bridge or
+> the CLI's own OpenTelemetry spans, are written as Claude Code transcripts
+> and mined by `rrsi-mine traces` unchanged; a session exported twice counts
+> once; generation and turn classes (`llm_truncated`, `llm_error`,
+> `turn_failed`) are added. A LiteLLM gateway's request logs (list view:
+> metadata, never prompt text; caller identity dropped before writing) give
+> gateway classes: failures by kind (`model_access_denied`,
+> `context_overflow`, `bad_request`, `rate_limited`, ...), `llm_retry` (a
+> failed request re-sent), `gateway_retry`, `context_pressure` (>= 90% of the
+> model's input limit), `empty_completion`, `slow_first_token`. The crawl is
+> scoped: every request of your own key, the failures of every key, and
+> per-window totals as the denominator. Keys come from the environment only.
+>
+> ```bash
+> LITELLM_API_KEY=... python -m rrsi.harness.langfuse_miner fetch-litellm --scope self --base URL --since 2026-09-15 --until 2026-10-04 --raw RAW
+> LITELLM_API_KEY=... python -m rrsi.harness.langfuse_miner fetch-litellm --scope failures --base URL --since 2026-09-15 --until 2026-10-04 --raw RAW
+> LITELLM_API_KEY=... python -m rrsi.harness.langfuse_miner count-litellm --base URL --since 2026-09-15 --until 2026-10-04 --raw RAW
+> LANGFUSE_PUBLIC_KEY=... LANGFUSE_SECRET_KEY=... python -m rrsi.harness.langfuse_miner fetch-langfuse --host URL --label NAME --raw RAW
+> python -m rrsi.harness.langfuse_miner episodes --raw RAW --out OUT.jsonl --gateway-label NAME   # + OUT.summary.json
+> python -m rrsi.harness.langfuse_miner table --summary OUT.summary.json                          # ranked markdown table
+> ```
+>
 > **Is the harness compounding? One repeatable measurement.**
 > `python -m rrsi harness measure` turns the same episodes into a daily
 > series: harness-fixable struggle episodes per 1,000 agent tool calls, by
