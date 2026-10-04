@@ -269,7 +269,8 @@ class LangfuseSessions(unittest.TestCase):
         self.assertEqual([e["signals"] for e in bridge], [{"llm_truncated": 1, "turn_failed": 1}])
         self.assertEqual([e["signals"] for e in otel], [{"llm_error": 1, "llm_truncated": 1}])
         self.assertEqual(bridge[0]["user_turn"], "no, that's wrong - use the bazel target")
-        self.assertEqual(bridge[0]["refs"], ["1f00c0de1f00c0de1f00c0de1f00c0d1"])
+        self.assertEqual(bridge[0]["examples"], {"llm_truncated": "1f00c0de1f00c0de1f00c0de1f00c0d1/a000000000000010",
+                                                 "turn_failed": "1f00c0de1f00c0de1f00c0de1f00c0d1/a000000000000011"})
 
 
 EXE = M.CRATE / "target" / "release" / "rrsi-mine"
@@ -298,7 +299,11 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(traced, {("langfuse-copilot", False): {"tool_error": 1, "user_correction": 1},
                                   ("langfuse-copilot", True): {"tool_error": 1},
                                   ("langfuse-csf", False): {"tool_error": 1}})
-        rust = next(e for e in eps if e["project"] == "langfuse-copilot" and not e["file"].endswith(".generations"))
+        rust = next(e for e in eps if e["project"] == "langfuse-copilot" and not e["file"].endswith(".generations")
+                    and not e["subagent"])
+        # Each hit maps back to the observation behind it (the first of a twice-exported pair).
+        self.assertEqual(rust["examples"], {"tool_error": "1f00c0de1f00c0de1f00c0de1f00c0d1/a0000000000000004",
+                                            "user_correction": "1f00c0de1f00c0de1f00c0de1f00c0d1/a000000000000007"})
         ours = next(e for e in eps if e["project"] == "litellm-b300-self")
         self.assertEqual(set(rust), set(ours))
         self.assertEqual(set(rust["counts"]), set(ours["counts"]))

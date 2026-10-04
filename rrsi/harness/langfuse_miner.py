@@ -503,6 +503,11 @@ def _ordered(obs: list[dict]) -> list[tuple[str, dict]]:
                   key=lambda ko: (parse_ts(ko[1]["startTime"]), RANK[ko[0]], ko[1]["id"]))
 
 
+def ref_of(o: dict) -> str:
+    """An observation's example id: `<trace id>/<observation id>`."""
+    return f"{o['traceId']}/{o['id']}"
+
+
 def _agent(o: dict) -> str:
     v = o["metadata"].get("parentToolCallId")
     return v if isinstance(v, str) else ""
@@ -514,7 +519,8 @@ def transcript_lines(obs: list[dict]) -> dict[str, list[dict]]:
     out: dict[str, list[dict]] = defaultdict(list)
     for kind, o in _ordered(obs):
         agent, ts, sid = _agent(o), o["startTime"], session_of(o)
-        base = {"timestamp": ts, "sessionId": sid}
+        # rrsi-mine ignores the extra field; it maps hits back to observations.
+        base = {"timestamp": ts, "sessionId": sid, "langfuseRef": ref_of(o)}
         if agent != "":
             base |= {"isSidechain": True, "agentId": agent}
         if kind == "human":
@@ -564,18 +570,18 @@ def langfuse_hits(evs: list[tuple[str, dict]]) -> dict[int, list[Signal]]:
 
 def langfuse_event(kind: str, o: dict) -> Ev:
     if kind == "human":
-        return Ev(ts=o["startTime"], kind="human", text=o.get("input", ""), ref=o["traceId"])
+        return Ev(ts=o["startTime"], kind="human", text=o.get("input", ""), ref=ref_of(o))
     if kind == "assistant":
-        return Ev(ts=o["startTime"], kind="assistant", text=o.get("output", ""), ref=o["traceId"])
+        return Ev(ts=o["startTime"], kind="assistant", text=o.get("output", ""), ref=ref_of(o))
     if kind == "tool_use":
-        return Ev(ts=o["startTime"], kind="tool_use", text="", ref=o["traceId"], tool=tool_name(o), call=True)
+        return Ev(ts=o["startTime"], kind="tool_use", text="", ref=ref_of(o), tool=tool_name(o), call=True)
     if kind == "tool_result":
         err = o["metadata"].get("success") is False or o["level"] == ERROR_LEVEL
-        return Ev(ts=o["startTime"], kind="tool_result", text=o["statusMessage"], ref=o["traceId"], is_error=err)
+        return Ev(ts=o["startTime"], kind="tool_result", text=o["statusMessage"], ref=ref_of(o), is_error=err)
     reasons = ",".join(finish_reasons(o))
     text = f"{o['name']} level {o['level']}" + (f", finish {reasons}" if reasons != "" else "") \
         + (f": {o['statusMessage']}" if o["statusMessage"] != "" else "")
-    return Ev(ts=o["startTime"], kind=kind, text=text, ref=o["traceId"], tool=o["name"],
+    return Ev(ts=o["startTime"], kind=kind, text=text, ref=ref_of(o), tool=o["name"],
               is_error=o["level"] == ERROR_LEVEL)
 
 
@@ -610,17 +616,39 @@ def transcript_rel(label: str, session: str, agent: str) -> str:
         else f"langfuse-{label}/{session}/subagents/agent-{agent}.jsonl"
 
 
-def write_transcripts(obs: list[dict], label: str, root: Path) -> dict[str, str]:
-    """Writes every session's transcripts under root; returns transcript -> trace id."""
-    traces = {}
+def line_kind(line: dict) -> str:
+    """The rrsi-mine event kind a transcript line becomes."""
+    c = line["message"]["content"]
+    if isinstance(c, str):
+        return "human"
+    return {"text": "assistant", "tool_use": "tool_use", "tool_result": "tool_result"}[c[0]["type"]]
+
+
+@dataclass(frozen=True)
+class Refs:
+    """Where a mined transcript came from: its session's main trace and the
+    observation behind each (timestamp, event kind)."""
+
+    trace: dict[str, str]
+    line: dict[tuple[str, str, str], str]
+
+    def of(self, rel: str, ts: str, kind: str) -> str:
+        return self.line.get((rel, ts, kind), self.trace[rel])
+
+
+def write_transcripts(obs: list[dict], label: str, root: Path) -> Refs:
+    """Writes every session's transcripts under root."""
+    refs = Refs({}, {})
     for sid, os_ in langfuse_sessions(obs).items():
         trace = Counter(o["traceId"] for o in os_).most_common(1)[0][0]
         for agent, lines in transcript_lines(os_).items():
             rel = transcript_rel(label, sid, agent)
             (root / rel).parent.mkdir(parents=True, exist_ok=True)
             (root / rel).write_text("".join(json.dumps(l) + "\n" for l in lines))
-            traces[rel] = trace
-    return traces
+            refs.trace[rel] = trace
+            for l in lines:
+                refs.line.setdefault((rel, l["timestamp"], line_kind(l)), l["langfuseRef"])
+    return refs
 
 
 def langfuse_episodes(obs: list[dict], label: str) -> list[dict]:
@@ -644,13 +672,23 @@ def traces_episodes(obs: list[dict], label: str, work: Path, exe: Path) -> tuple
     """The nine transcript classes: the sessions as transcripts, mined by
     `rrsi-mine traces` unchanged; each episode's refs are its trace id."""
     root = M.ensure_private(work / "transcripts")
-    traces = write_transcripts(obs, label, root)
+    refs = write_transcripts(obs, label, root)
     out = M.ensure_private(work / "traces")
     r = subprocess.run([str(exe), "traces", "--root", str(root), "--out", str(out), "--jobs", "8"],
                        check=True, capture_output=True, text=True)
     summary = json.loads(r.stdout)
-    eps = [e | {"refs": [traces[e["file"]]], "examples": {s: traces[e["file"]] for s in e["signals"]}}
-           for e in M.load_episodes(out) if e["project"] == f"langfuse-{label}"]
+    eps = []
+    for e in M.load_episodes(out):
+        if e["project"] != f"langfuse-{label}":
+            continue
+        examples: dict[str, str] = {}
+        for c in e["context"]:
+            for sig in c.get("signals", []):
+                examples.setdefault(sig, refs.of(e["file"], c["ts"], c["kind"]))
+        for sig in e["signals"]:
+            examples.setdefault(sig, refs.trace[e["file"]])
+        eps.append(e | {"refs": list(dict.fromkeys(examples.values()))[:REFS_MAX],
+                        "examples": dict(sorted(examples.items()))})
     return eps, summary
 
 
@@ -691,6 +729,8 @@ FIXES = {
 
 
 EXAMPLES = 2
+#: Rates are per this many observations.
+PER = 1000
 
 
 def summarize(eps: list[dict], observations: dict[str, int]) -> dict:
@@ -719,7 +759,7 @@ def ranked(summary: dict) -> list[dict]:
             n = s["observations"]
             rows.append({"class": sig, "source": src, "episodes": c["episodes"], "hits": c["hits"],
                          "observations": n,
-                         "rate_per_1k": round(1000 * c["episodes"] / n, 3) if n > 0 else None,
+                         "rate_per_1k": round(PER * c["episodes"] / n, 3) if n > 0 else None,
                          "examples": c["examples"], "fix": FIXES.get(sig, "")})
     return sorted(rows, key=lambda r: (-r["episodes"], -r["hits"], r["class"], r["source"]))
 
